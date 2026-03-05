@@ -1,0 +1,270 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent Router API",
+    "version": "0.1.0",
+    "description": "Unified OpenAPI entrypoint for Codex, Claude, and Gemini CLIs via ACP."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/providers": {
+      "get": {
+        "summary": "List providers",
+        "operationId": "listProviders",
+        "responses": {
+          "200": {
+            "description": "Available providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvidersResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/chat": {
+      "post": {
+        "summary": "Run one ACP prompt",
+        "operationId": "chat",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Prompt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Runtime error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/chat/stream": {
+      "post": {
+        "summary": "Run one ACP prompt with SSE streaming",
+        "operationId": "chatStream",
+        "description": "Streams real-time ACP updates and token chunks as Server-Sent Events.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream with event/token/done/error frames",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error before stream starts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatRequest": {
+        "type": "object",
+        "required": [
+          "provider",
+          "message"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude",
+              "gemini"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Absolute or relative working directory for ACP session."
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600000
+          },
+          "permissionMode": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "reject"
+            ],
+            "default": "allow"
+          },
+          "includeEvents": {
+            "type": "boolean",
+            "default": false
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "co.yes.vg API key. Optional when COYES_API_KEY or X-API-Key header is set."
+          }
+        }
+      },
+      "ChatResponse": {
+        "type": "object",
+        "required": [
+          "provider",
+          "sessionId",
+          "stopReason",
+          "outputText",
+          "elapsedMs"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "protocolVersion": {
+            "type": "integer"
+          },
+          "stopReason": {
+            "type": "string"
+          },
+          "outputText": {
+            "type": "string"
+          },
+          "elapsedMs": {
+            "type": "integer"
+          },
+          "updates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "stderr": {
+            "type": "string"
+          }
+        }
+      },
+      "ProvidersResponse": {
+        "type": "object",
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "service"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "service": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

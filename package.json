@@ -1,0 +1,15 @@
+{
+  "name": "agent-router",
+  "version": "0.1.0",
+  "description": "Local OpenAPI router that wraps Codex, Claude, and Gemini CLIs via ACP.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
