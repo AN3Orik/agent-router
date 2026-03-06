@@ -5,8 +5,10 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
+    "build": "npm run build:opencode-plugin",
+    "build:opencode-plugin": "node scripts/build-opencode-plugin.mjs",
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js"
+    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js && node --check src/model-catalog.js && node --check opencode/co-yes-auth/index.mjs && node --check scripts/build-opencode-plugin.mjs"
   },
   "engines": {
     "node": ">=20"

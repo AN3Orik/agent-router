@@ -47,6 +47,101 @@
         }
       }
     },
+    "/v1/models": {
+      "get": {
+        "summary": "OpenAI-compatible models list",
+        "description": "Dynamic yescode catalog merged from Codex/Claude/Gemini model sets.",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Available models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "OpenAI-compatible chat completions",
+        "operationId": "chatCompletions",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion result or SSE stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionsResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "summary": "OpenAI-compatible responses API",
+        "operationId": "responsesApi",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResponsesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Response object or SSE stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsesResult"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agents/chat": {
       "post": {
         "summary": "Run one ACP prompt",
@@ -147,6 +242,7 @@
           "provider": {
             "type": "string",
             "enum": [
+              "yescode",
               "codex",
               "claude",
               "gemini"
@@ -154,6 +250,10 @@
           },
           "message": {
             "type": "string"
+          },
+          "model": {
+            "type": "string",
+            "description": "Provider model id (for example: gpt-5-codex, sonnet, gemini-2.5-flash)."
           },
           "cwd": {
             "type": "string",
@@ -171,6 +271,19 @@
               "reject"
             ],
             "default": "allow"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "description": "Reasoning level forwarded to Codex CLI as model_reasoning_effort."
           },
           "includeEvents": {
             "type": "boolean",
@@ -196,6 +309,9 @@
             "type": "string"
           },
           "sessionId": {
+            "type": "string"
+          },
+          "model": {
             "type": "string"
           },
           "protocolVersion": {
@@ -233,6 +349,231 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "object"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "object": {
+                  "type": "string"
+                },
+                "owned_by": {
+                  "type": "string"
+                },
+                "metadata": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "family": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ChatCompletionsRequest": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model id, eg. co-codex/co-claude/co-gemini."
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "yescode",
+              "codex",
+              "claude",
+              "gemini"
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "type": "integer"
+          },
+          "permissionMode": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "reject"
+            ]
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "reasoning": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "apiKey": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatCompletionsResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "object",
+          "model",
+          "choices"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "ResponsesRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "yescode",
+              "codex",
+              "claude",
+              "gemini"
+            ]
+          },
+          "input": {
+            "description": "String or structured input payload.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array"
+              }
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "reasoning": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "apiKey": {
+            "type": "string"
+          }
+        }
+      },
+      "ResponsesResult": {
+        "type": "object",
+        "required": [
+          "id",
+          "object",
+          "output_text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_text": {
+            "type": "string"
           }
         }
       },

@@ -1,0 +1,15 @@
+{
+  "name": "opencode-yescode-auth",
+  "version": "0.1.0",
+  "description": "OpenCode auth plugin for yescode with embedded local router bootstrap.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "router/"
+  ],
+  "license": "MIT"
+}

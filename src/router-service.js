@@ -2,13 +2,40 @@ import path from "node:path";
 import { AcpProcess } from "./acp-process.js";
 import { APP_CONFIG, buildProviderRuntime } from "./config.js";
 
-const VALID_PROVIDERS = new Set(["codex", "claude", "gemini"]);
+const VALID_PROVIDERS = new Set(["yescode", "codex", "claude", "gemini"]);
 const VALID_PERMISSION_MODES = new Set(["allow", "reject"]);
+const VALID_REASONING_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+
+function resolveYescodeProvider(model) {
+  const id = String(model || "").toLowerCase();
+  if (id.includes("gemini")) {
+    return "gemini";
+  }
+  if (
+    id.includes("claude") ||
+    id.includes("sonnet") ||
+    id.includes("opus") ||
+    id.includes("haiku")
+  ) {
+    return "claude";
+  }
+  return "codex";
+}
 
 function normalizeProvider(value) {
   const provider = String(value || "").trim().toLowerCase();
   if (!VALID_PROVIDERS.has(provider)) {
-    throw new Error(`Unsupported provider "${value}". Use: codex | claude | gemini.`);
+    throw new Error(
+      `Unsupported provider "${value}". Use: yescode | codex | claude | gemini.`
+    );
   }
   return provider;
 }
@@ -35,6 +62,20 @@ function normalizePermissionMode(value) {
   return mode;
 }
 
+function normalizeModel(value) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const model = String(value).trim();
+  if (!model) {
+    return undefined;
+  }
+  if (model.length > 200) {
+    throw new Error("model must be shorter than 200 characters.");
+  }
+  return model;
+}
+
 function normalizeTimeout(value) {
   if (value === undefined || value === null) {
     return APP_CONFIG.requestTimeoutMs;
@@ -46,19 +87,50 @@ function normalizeTimeout(value) {
   return timeoutMs;
 }
 
+function normalizeReasoningEffort(value) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const effort = String(value).trim().toLowerCase();
+  if (!effort) {
+    return undefined;
+  }
+  if (!VALID_REASONING_EFFORTS.has(effort)) {
+    throw new Error(
+      `Unsupported reasoningEffort "${value}". Use: ${[...VALID_REASONING_EFFORTS].join(" | ")}.`
+    );
+  }
+  return effort;
+}
+
 function normalizeRequest({
   provider: rawProvider,
   message: rawMessage,
+  model: rawModel,
   cwd: rawCwd,
   timeoutMs: rawTimeoutMs,
-  permissionMode: rawPermissionMode
+  permissionMode: rawPermissionMode,
+  reasoningEffort: rawReasoningEffort
 }) {
   const provider = normalizeProvider(rawProvider);
   const message = normalizeMessage(rawMessage);
+  const model = normalizeModel(rawModel);
+  const effectiveProvider =
+    provider === "yescode" ? resolveYescodeProvider(model) : provider;
   const cwd = normalizeCwd(rawCwd);
   const timeoutMs = normalizeTimeout(rawTimeoutMs);
   const permissionMode = normalizePermissionMode(rawPermissionMode);
-  return { provider, message, cwd, timeoutMs, permissionMode };
+  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  return {
+    provider: effectiveProvider,
+    requestedProvider: provider,
+    model,
+    reasoningEffort,
+    message,
+    cwd,
+    timeoutMs,
+    permissionMode
+  };
 }
 
 function withAbort(promise, signal) {
@@ -82,16 +154,21 @@ function withAbort(promise, signal) {
 
 async function runInternal({
   provider,
+  requestedProvider,
+  model,
   message,
   cwd,
   timeoutMs,
   permissionMode,
   includeEvents,
   apiKey,
+  reasoningEffort,
   onEvent,
   signal
 }) {
-  const runtimeConfig = buildProviderRuntime(provider, apiKey);
+  const runtimeConfig = buildProviderRuntime(provider, apiKey, model, {
+    reasoningEffort
+  });
   const runner = new AcpProcess({
     ...runtimeConfig,
     cwd,
@@ -133,7 +210,9 @@ async function runInternal({
     const promptResult = await withAbort(runner.prompt(message, timeoutMs), signal);
     const elapsedMs = Date.now() - startedAt;
     const result = {
-      provider,
+      provider: requestedProvider || provider,
+      routedProvider: provider,
+      model: runtimeConfig.model || model || null,
       sessionId: session.sessionId,
       protocolVersion: init.protocolVersion,
       stopReason: promptResult.stopReason || "unknown",
@@ -155,6 +234,13 @@ async function runInternal({
   } finally {
     signal?.removeEventListener("abort", handleAbort);
     await runner.close();
+    if (typeof runtimeConfig.cleanup === "function") {
+      try {
+        runtimeConfig.cleanup();
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
   }
 }
 
@@ -189,5 +275,5 @@ export async function runProviderPromptStream({
 }
 
 export function listProviders() {
-  return ["codex", "claude", "gemini"];
+  return ["yescode", "codex", "claude", "gemini"];
 }
