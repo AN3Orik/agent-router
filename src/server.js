@@ -1,8 +1,5 @@
 import http from "node:http";
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { APP_CONFIG, resolveApiKey } from "./config.js";
 import { getModelCatalog, resolveProviderAndModel } from "./model-catalog.js";
 import {
@@ -10,9 +7,7 @@ import {
   runProviderPrompt,
   runProviderPromptStream
 } from "./router-service.js";
-
-const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const OPENAPI_PATH = path.resolve(MODULE_DIR, "..", "openapi.json");
+import OPENAPI_EMBEDDED from "../openapi.json" with { type: "json" };
 
 function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, {
@@ -52,8 +47,7 @@ function extractHeaderApiKey(req) {
 }
 
 async function getOpenApi() {
-  const content = await fs.readFile(OPENAPI_PATH, "utf8");
-  return JSON.parse(content);
+  return OPENAPI_EMBEDDED;
 }
 
 function beginSse(res) {

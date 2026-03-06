@@ -1,0 +1,73 @@
+name: Release On Tag
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set plugin version from tag
+        id: version
+        shell: pwsh
+        run: |
+          node scripts/set-plugin-version-from-tag.mjs "${{ github.ref_name }}"
+          $version = node -p "JSON.parse(require('fs').readFileSync('opencode/co-yes-auth/package.json','utf8')).version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build OpenCode plugin bundle
+        run: npm run build:opencode-plugin
+
+      - name: Build standalone router exe
+        run: npm run build:router:exe
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+
+          $pluginZip = "release/co-yes-auth-opencode-plugin-$version.zip"
+          if (Test-Path $pluginZip) { Remove-Item -Force $pluginZip }
+          Compress-Archive -Path "dist/opencode/co-yes-auth/*" -DestinationPath $pluginZip -CompressionLevel Optimal
+
+          $exePath = "dist/router/agent-router.exe"
+          $exeOut = "release/agent-router-$version.exe"
+          Copy-Item -Force $exePath $exeOut
+
+          $checksums = @(
+            (Get-FileHash $pluginZip -Algorithm SHA256).Hash.ToLower() + "  " + [System.IO.Path]::GetFileName($pluginZip)
+            (Get-FileHash $exeOut -Algorithm SHA256).Hash.ToLower() + "  " + [System.IO.Path]::GetFileName($exeOut)
+          )
+          $checksums -join "`n" | Out-File -FilePath "release/SHA256SUMS.txt" -Encoding utf8
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            release/co-yes-auth-opencode-plugin-${{ steps.version.outputs.version }}.zip
+            release/agent-router-${{ steps.version.outputs.version }}.exe
+            release/SHA256SUMS.txt

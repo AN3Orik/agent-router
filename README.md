@@ -10,10 +10,7 @@ Local OpenAPI server that wraps `codex`, `claude`, and `gemini` CLIs via ACP and
 - Returns a single JSON response via OpenAPI endpoint
 - Preconfigured for `co.yes.vg` URLs
 - Exposes OpenAI-compatible endpoints for agent frameworks (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
-- Supports reasoning effort passthrough to wrapped CLIs:
-  - Codex: `model_reasoning_effort`
-  - Claude: `--effort`
-  - Gemini: per-request `thinkingConfig` via temporary Gemini settings
+- Supports `reasoningEffort` passthrough for Codex/Claude/Gemini
 
 ## Requirements
 
@@ -33,6 +30,24 @@ npm start
 ```
 
 Server starts on `http://127.0.0.1:8787`.
+
+## Build standalone router `.exe` (Bun)
+
+```powershell
+cd H:\GIT\!Libs\agent-router
+npm run build:router:exe
+```
+
+Output:
+
+- `dist/router/agent-router.exe` (OpenAPI spec is embedded)
+
+Run executable:
+
+```powershell
+$env:COYES_API_KEY="YOUR_CO_YES_KEY"
+dist\router\agent-router.exe
+```
 
 ## API
 
@@ -96,20 +111,6 @@ and closes with `data: [DONE]`.
 - Source endpoint: `https://co.yes.vg/api/v1/public/models`
 
 So `yescode` can expose all available model ids from all 3 sets.
-
-## Reasoning effort input
-
-You can pass reasoning effort in requests as:
-
-- `reasoningEffort`
-- `reasoning_effort`
-- `reasoning.effort` (OpenAI-style object)
-
-Allowed values at router level:
-
-- `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
-
-Actual allowed values depend on provider/model. Unsupported combinations fail with validation/runtime error (no silent fallback).
 
 ## Key handling
 

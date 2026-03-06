@@ -9,6 +9,15 @@ npm run build:opencode-plugin
 
 Build output: `dist/opencode/co-yes-auth/`.
 
+Note: this build is for the OpenCode plugin bundle (embedded router).  
+If you need a standalone router executable, use root script:
+
+```powershell
+npm run build:router:exe
+```
+
+Standalone output is a single file: `dist/router/agent-router.exe`.
+
 ## Install (one click)
 
 ```powershell
@@ -22,21 +31,7 @@ What installer does automatically:
 - checks `auth.json` for existing `yescode` key; if key is missing, runs `opencode auth login --provider yescode`
 - pulls live models from `https://co.yes.vg/api/v1/public/models`
 - enriches each model from `https://models.dev/api.json` when exact match exists
-- writes full `provider.yescode.models` metadata (`family`, `limit`, `modalities`, `reasoning`, `tool_call`, `cost`, etc.)
-- writes `variants` per model only for supported reasoning modes (no synthetic fallback)
-
-### Reasoning variants written at install time
-
-- OpenAI models:
-  - GPT reasoning models: `none|minimal|low|medium|high|xhigh` (depends on exact model/release)
-  - Codex models: `low|medium|high` (+ `xhigh` for newer codex variants where applicable)
-- Anthropic models:
-  - Standard reasoning models: `high|max`
-  - Claude 4.6 family: `low|medium|high|max`
-- Gemini models:
-  - `gemini-2.5-*`: `high|max`
-  - `gemini-3-*`: `low|high`
-  - `gemini-3.1-*`: `low|medium|high`
+- writes `provider.yescode.models` metadata and valid reasoning variants per model
 
 ## Uninstall
 

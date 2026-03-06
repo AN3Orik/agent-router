@@ -7,8 +7,10 @@
   "scripts": {
     "build": "npm run build:opencode-plugin",
     "build:opencode-plugin": "node scripts/build-opencode-plugin.mjs",
+    "build:router:exe": "node scripts/build-router-exe.mjs",
+    "set:plugin-version-from-tag": "node scripts/set-plugin-version-from-tag.mjs",
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js && node --check src/model-catalog.js && node --check opencode/co-yes-auth/index.mjs && node --check scripts/build-opencode-plugin.mjs"
+    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js && node --check src/model-catalog.js && node --check opencode/co-yes-auth/index.mjs && node --check scripts/build-opencode-plugin.mjs && node --check scripts/build-router-exe.mjs && node --check scripts/set-plugin-version-from-tag.mjs"
   },
   "engines": {
     "node": ">=20"
