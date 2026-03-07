@@ -41,7 +41,7 @@ async function checkHealth(routerRoot) {
     if (!res.ok) {
       return false;
     }
-    const payload = await res.json();
+    const payload = (await res.json()) as any;
     return payload?.ok === true;
   } catch {
     return false;
@@ -80,15 +80,33 @@ function resolveRouterEntry(customEntry) {
 }
 
 function resolveRuntimeCommands() {
+  const normalizeRuntime = (runtime) => {
+    if (!runtime) {
+      return "";
+    }
+    return String(runtime).trim();
+  };
+  const isNodeRuntime = (runtime) => {
+    const value = normalizeRuntime(runtime);
+    if (!value) {
+      return false;
+    }
+    const name = path.basename(value).toLowerCase();
+    return name === "node" || name === "node.exe";
+  };
+
   const commands = [];
   if (process.env.YESCODE_ROUTER_RUNTIME) {
-    commands.push(process.env.YESCODE_ROUTER_RUNTIME);
+    commands.push(normalizeRuntime(process.env.YESCODE_ROUTER_RUNTIME));
   }
-  // OpenCode runs under Bun; prefer explicit Node binary for child processes.
+  // Windows: force Node first because ACP child-process spawning is most reliable under Node.
   commands.push(process.platform === "win32" ? "node.exe" : "node");
-  if (process.execPath) {
-    commands.push(process.execPath);
+  // Reuse current runtime only when it is Node.
+  if (process.execPath && isNodeRuntime(process.execPath)) {
+    commands.push(normalizeRuntime(process.execPath));
   }
+  // Keep Bun as last fallback.
+  commands.push(process.platform === "win32" ? "bun.exe" : "bun");
   return [...new Set(commands.filter(Boolean))];
 }
 
@@ -230,12 +248,23 @@ function readApiKey(auth) {
 }
 
 export async function YescodeAuthPlugin() {
+  const pluginInput =
+    arguments.length > 0 && arguments[0] && typeof arguments[0] === "object"
+      ? arguments[0]
+      : {};
   const providerId = "yescode";
-  const providerName = "yescode";
   const routerBaseUrl = process.env.YESCODE_ROUTER_BASE_URL || "http://127.0.0.1:8787/v1";
   const autoStartRouter = process.env.YESCODE_AUTOSTART_ROUTER !== "0";
   const routerEntry = process.env.YESCODE_ROUTER_ENTRY || "";
-  const routerEnv = {};
+  const pluginWorkdir =
+    (typeof pluginInput.worktree === "string" && pluginInput.worktree.trim()) ||
+    (typeof pluginInput.directory === "string" && pluginInput.directory.trim()) ||
+    "";
+  const routerEnv = pluginWorkdir
+    ? {
+        DEFAULT_CWD: pluginWorkdir
+      }
+    : {};
 
   return {
     auth: {
@@ -257,6 +286,7 @@ export async function YescodeAuthPlugin() {
         const options = provider?.options || {};
         const headers = options.headers || {};
         const baseURL = options.baseURL || routerBaseUrl;
+        const upstreamFetch = options.fetch || fetch;
 
         if (autoStartRouter && isLocalBaseUrl(baseURL)) {
           await ensureRouterRunning({
@@ -268,14 +298,36 @@ export async function YescodeAuthPlugin() {
         }
 
         return {
+          ...options,
+          // Ask OpenCode to send stable promptCacheKey/session key per chat.
+          setCacheKey: true,
+          baseURL,
+          headers: {
+            ...headers,
+            "x-api-key": apiKey,
+            ...(pluginWorkdir ? { "x-yescode-cwd": pluginWorkdir } : {})
+          },
           apiKey,
-          options: {
-            ...options,
-            baseURL,
-            headers: {
-              ...headers,
-              "x-api-key": apiKey
+          fetch: async (input, init) => {
+            if (autoStartRouter && isLocalBaseUrl(baseURL)) {
+              await ensureRouterRunning({
+                baseUrl: baseURL,
+                apiKey,
+                routerEntry,
+                extraEnv: routerEnv
+              });
             }
+            const requestHeaders = new Headers(init?.headers || {});
+            if (!requestHeaders.has("x-api-key")) {
+              requestHeaders.set("x-api-key", apiKey);
+            }
+            if (pluginWorkdir && !requestHeaders.has("x-yescode-cwd")) {
+              requestHeaders.set("x-yescode-cwd", pluginWorkdir);
+            }
+            return upstreamFetch(input, {
+              ...init,
+              headers: requestHeaders
+            });
           }
         };
       }

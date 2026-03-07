@@ -26,11 +26,14 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install dependencies
+        run: npm install
+
       - name: Set plugin version from tag
         id: version
         shell: pwsh
         run: |
-          node scripts/set-plugin-version-from-tag.mjs "${{ github.ref_name }}"
+          npm run set:plugin-version-from-tag -- "${{ github.ref_name }}"
           $version = node -p "JSON.parse(require('fs').readFileSync('opencode/co-yes-auth/package.json','utf8')).version"
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 

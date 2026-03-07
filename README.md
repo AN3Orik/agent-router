@@ -6,11 +6,12 @@ Local OpenAPI server that wraps `codex`, `claude`, and `gemini` CLIs via ACP and
 
 - Starts the selected CLI in ACP mode (`codex-acp`, `claude-code-acp`, `gemini --experimental-acp`)
 - Connects as ACP client (`initialize` -> `session/new` -> `session/prompt`)
-- Streams and aggregates agent message chunks into one `outputText`
+- Streams agent text chunks (`token` / OpenAI-compatible deltas)
 - Returns a single JSON response via OpenAPI endpoint
 - Preconfigured for `co.yes.vg` URLs
 - Exposes OpenAI-compatible endpoints for agent frameworks (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
 - Supports `reasoningEffort` passthrough for Codex/Claude/Gemini
+- Does not bridge ACP tool-call events into OpenAI output; responses contain model-generated content only
 
 ## Requirements
 
@@ -25,6 +26,7 @@ Local OpenAPI server that wraps `codex`, `claude`, and `gemini` CLIs via ACP and
 
 ```powershell
 cd H:\GIT\!Libs\agent-router
+npm install
 $env:COYES_API_KEY="YOUR_CO_YES_KEY"
 npm start
 ```
@@ -35,6 +37,7 @@ Server starts on `http://127.0.0.1:8787`.
 
 ```powershell
 cd H:\GIT\!Libs\agent-router
+npm install
 npm run build:router:exe
 ```
 
@@ -53,6 +56,7 @@ dist\router\agent-router.exe
 
 - OpenAPI spec: `GET /openapi.json`
 - Health: `GET /health`
+- Runtime stats: `GET /v1/runtime`
 - Providers: `GET /v1/providers`
 - OpenAI models: `GET /v1/models`
 - OpenAI chat completions: `POST /v1/chat/completions`
@@ -67,6 +71,7 @@ Request example:
   "provider": "yescode",
   "model": "claude-sonnet-4-5",
   "reasoningEffort": "high",
+  "sessionMode": "sticky",
   "message": "Respond with exactly OK",
   "permissionMode": "allow",
   "timeoutMs": 180000
@@ -106,6 +111,32 @@ SSE events:
 OpenAI-compatible streaming (`stream: true`) returns `data: ...` SSE chunks
 and closes with `data: [DONE]`.
 
+## Persistent pool sessions
+
+`ACP_POOL_ENABLED=1` (default) keeps a pool of live CLI ACP workers and reuses
+them between requests.
+
+- `sessionMode: "stateless"` (default): worker is reused, but ACP conversation
+  session is recreated every request.
+- `sessionMode: "sticky"`: router reuses the same ACP conversation session and
+  returns `routerSessionId`; pass it back on next requests to continue context.
+- `releaseSession: true` closes a sticky session after the response.
+- OpenCode integration is automatic: plugin sets `setCacheKey=true`, OpenCode
+  sends `promptCacheKey`, router auto-bridges it to sticky ACP `routerSessionId`.
+
+Pool env vars:
+
+- `ACP_POOL_MAX_SIZE` (default `2`)
+- `ACP_POOL_MIN_SIZE` (default `0`)
+- `ACP_POOL_IDLE_TTL_MS` (default `300000`)
+- `ACP_POOL_STICKY_TTL_MS` (default `1800000`)
+- `ACP_POOL_ACQUIRE_TIMEOUT_MS` (default `30000`)
+- `ACP_POOL_MAX_QUEUE` (default `256`)
+- `ACP_POOL_MAX_REQUESTS_PER_WORKER` (default `200`)
+- `ACP_SESSION_MODE` (`stateless` or `sticky`, default `stateless`)
+- `OPENAI_AUTO_SESSION_BRIDGE` (default `1`)
+- `OPENAI_SESSION_BRIDGE_TTL_MS` (default `1800000`)
+
 `GET /v1/models` now resolves a dynamic catalog from `co.yes.vg`:
 
 - Source endpoint: `https://co.yes.vg/api/v1/public/models`
@@ -138,12 +169,13 @@ Override with env vars:
 
 Full OpenCode plugin integration (auth provider + config example) is in:
 
-- `opencode/co-yes-auth/index.mjs`
+- `opencode/co-yes-auth/index.ts`
 - `opencode/README.md`
 
 Build embedded router bundle for the plugin:
 
 ```powershell
+npm install
 npm run build:opencode-plugin
 ```
 
@@ -157,3 +189,4 @@ Installer script also auto-adds `provider.yescode` into OpenCode config
 (`%USERPROFILE%\.config\opencode\opencode.json` or `.jsonc`), adds local plugin
 entry, synchronizes model metadata + variants from `co.yes.vg` + `models.dev`,
 and runs `opencode auth login --provider yescode` only when `yescode` key is not already present in auth storage.
+The plugin also forwards the active OpenCode worktree as request `cwd`, so Codex/Claude/Gemini run in the project directory (not plugin directory).

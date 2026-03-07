@@ -5,6 +5,7 @@ $PluginName = "co-yes-auth"
 $TargetRoot = "$env:USERPROFILE\.config\opencode\plugins"
 $ConfigDir = "$env:USERPROFILE\.config\opencode"
 $TargetDir = Join-Path $TargetRoot $PluginName
+$TargetPrefix = "$PluginName-"
 $LegacyNodeModulesDir = "$env:USERPROFILE\.config\opencode\node_modules\opencode-yescode-auth"
 
 function Write-FileUtf8NoBom {
@@ -14,6 +15,108 @@ function Write-FileUtf8NoBom {
     )
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
+function Clear-ReadOnlyRecursive {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    try {
+        Get-ChildItem -Recurse -Force $Path -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+            } catch {
+                # Best effort.
+            }
+        }
+    } catch {
+        # Best effort.
+    }
+}
+
+function Get-YescodeRelatedProcessIds {
+    param([string]$TargetPath)
+
+    $ids = New-Object System.Collections.Generic.HashSet[int]
+    $normalized = ""
+    if ($TargetPath) {
+        try {
+            $normalized = [System.IO.Path]::GetFullPath($TargetPath).ToLowerInvariant()
+        } catch {
+            $normalized = [string]$TargetPath
+        }
+    }
+
+    try {
+        $processes = Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'bun.exe' OR Name = 'opencode.exe'"
+        foreach ($proc in $processes) {
+            $pidValue = [int]$proc.ProcessId
+            $cmd = [string]$proc.CommandLine
+            if (-not $cmd) {
+                continue
+            }
+
+            $cmdLower = $cmd.ToLowerInvariant()
+            $isRelated =
+                ($normalized -and $cmdLower.Contains($normalized)) -or
+                $cmdLower.Contains("co-yes-auth") -or
+                $cmdLower.Contains("agent-router")
+
+            if ($isRelated) {
+                [void]$ids.Add($pidValue)
+            }
+        }
+    } catch {
+        # Best effort.
+    }
+
+    return @($ids)
+}
+
+function Stop-YescodeRelatedProcesses {
+    param([string]$TargetPath)
+
+    $ids = @(Get-YescodeRelatedProcessIds -TargetPath $TargetPath)
+    foreach ($pidValue in $ids) {
+        try {
+            Stop-Process -Id $pidValue -Force -ErrorAction Stop
+            Write-Output "[INFO] Stopped process $pidValue that was locking plugin files."
+        } catch {
+            # Process may already be gone; continue.
+        }
+    }
+}
+
+function Remove-PathRobust {
+    param(
+        [string]$Path,
+        [int]$RetryCount = 20,
+        [int]$DelayMs = 250
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    for ($i = 0; $i -lt $RetryCount; $i++) {
+        try {
+            Clear-ReadOnlyRecursive -Path $Path
+            Remove-Item -Recurse -Force $Path -ErrorAction Stop
+            if (-not (Test-Path $Path)) {
+                return
+            }
+        } catch {
+            if ($i -eq 0 -or $i -eq 4 -or $i -eq 9) {
+                Stop-YescodeRelatedProcesses -TargetPath $Path
+            }
+            Start-Sleep -Milliseconds $DelayMs
+        }
+    }
+
+    throw "Failed to remove $Path. Another process still holds a lock."
 }
 
 function Get-ConfigPath {
@@ -76,14 +179,7 @@ if ($configPath) {
 
 if (Test-Path $TargetDir) {
     try {
-        Get-ChildItem -Recurse -Force $TargetDir -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
-            } catch {
-                # Keep going; best effort before delete.
-            }
-        }
-        Remove-Item -Recurse -Force $TargetDir
+        Remove-PathRobust -Path $TargetDir
         Write-Output "[OK] Removed plugin '$PluginName' from $TargetDir"
     } catch {
         Write-Output "[WARN] Could not fully remove $TargetDir. Close OpenCode and run uninstall again."
@@ -92,8 +188,21 @@ if (Test-Path $TargetDir) {
     Write-Output "[OK] Plugin '$PluginName' is not installed."
 }
 
+if (Test-Path $TargetRoot) {
+    $versionedDirs = Get-ChildItem -Path $TargetRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$TargetPrefix*" }
+    foreach ($dir in $versionedDirs) {
+        try {
+            Remove-PathRobust -Path $dir.FullName
+            Write-Output "[OK] Removed versioned plugin folder $($dir.FullName)"
+        } catch {
+            Write-Output "[WARN] Could not fully remove $($dir.FullName). Close OpenCode and run uninstall again."
+        }
+    }
+}
+
 if (Test-Path $LegacyNodeModulesDir) {
-    Remove-Item -Recurse -Force $LegacyNodeModulesDir
+    Remove-PathRobust -Path $LegacyNodeModulesDir
     Write-Output "[OK] Removed legacy plugin folder from $LegacyNodeModulesDir"
 } else {
     Write-Output "[OK] Legacy node_modules plugin folder is not installed."

@@ -2,18 +2,30 @@ import { APP_CONFIG } from "./config.js";
 
 const CACHE_TTL_MS = Number(process.env.MODEL_CATALOG_CACHE_MS || 60000);
 
-let cache = {
+type CatalogModel = {
+  id: string;
+  provider: "codex" | "claude" | "gemini";
+  family: string;
+  source: string;
+};
+
+let cache: {
+  key: string;
+  expiresAt: number;
+  models: CatalogModel[];
+  byId: Map<string, CatalogModel>;
+} = {
   key: "",
   expiresAt: 0,
   models: [],
   byId: new Map()
 };
 
-function trimSlash(value) {
+function trimSlash(value: string): string {
   return String(value || "").replace(/\/+$/, "");
 }
 
-function inferProviderFromModel(modelId) {
+function inferProviderFromModel(modelId: string): "codex" | "claude" | "gemini" {
   const id = String(modelId || "").toLowerCase();
   if (id.includes("gemini")) {
     return "gemini";
@@ -29,7 +41,7 @@ function inferProviderFromModel(modelId) {
   return "codex";
 }
 
-function toCatalogRecord(id, provider, family, source) {
+function toCatalogRecord(id: string, provider: CatalogModel["provider"], family: string, source: string): CatalogModel {
   return {
     id,
     provider,
@@ -38,7 +50,7 @@ function toCatalogRecord(id, provider, family, source) {
   };
 }
 
-async function fetchJson(url, headers) {
+async function fetchJson(url: string, headers: Record<string, string>): Promise<any> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
   try {
@@ -56,7 +68,7 @@ async function fetchJson(url, headers) {
   }
 }
 
-async function fetchPublicModels(apiKey) {
+async function fetchPublicModels(apiKey: string): Promise<CatalogModel[]> {
   const payload = await fetchJson(
     `${trimSlash(APP_CONFIG.coYesBaseUrl)}/api/v1/public/models`,
     {
@@ -74,8 +86,8 @@ async function fetchPublicModels(apiKey) {
     );
 }
 
-function dedupeModels(models) {
-  const byId = new Map();
+function dedupeModels(models: CatalogModel[]): Map<string, CatalogModel> {
+  const byId = new Map<string, CatalogModel>();
   for (const model of models) {
     if (!model?.id) {
       continue;
@@ -87,7 +99,10 @@ function dedupeModels(models) {
   return byId;
 }
 
-export async function getModelCatalog(apiKey, forceRefresh = false) {
+export async function getModelCatalog(apiKey: string, forceRefresh = false): Promise<{
+  models: CatalogModel[];
+  byId: Map<string, CatalogModel>;
+}> {
   if (!apiKey) {
     throw new Error("API key is required to list models.");
   }
@@ -106,7 +121,6 @@ export async function getModelCatalog(apiKey, forceRefresh = false) {
   }
 
   const publicRes = await fetchPublicModels(apiKey);
-
   const collected = Array.isArray(publicRes) ? publicRes : [];
 
   if (collected.length === 0) {
@@ -134,12 +148,16 @@ export async function resolveProviderAndModel({
   provider,
   model,
   apiKey
-}) {
+}: {
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+}): Promise<{ provider: "yescode" | "codex" | "claude" | "gemini"; model?: string }> {
   const providerRaw = String(provider || "").trim().toLowerCase();
   const requestedModel = String(model || "").trim();
   if (providerRaw && providerRaw !== "yescode") {
     return {
-      provider: providerRaw,
+      provider: providerRaw as "codex" | "claude" | "gemini",
       model: requestedModel || undefined
     };
   }

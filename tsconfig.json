@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noEmitOnError": true,
+    "outDir": ".build"
+  },
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "opencode/co-yes-auth/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "tmp",
+    "node_modules",
+    ".build"
+  ]
+}

@@ -2,8 +2,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $PluginName = "co-yes-auth"
-$TargetRoot = "$env:USERPROFILE\.config\opencode\plugins"
 $ConfigDir = "$env:USERPROFILE\.config\opencode"
+$AuthFilePath = Join-Path $env:USERPROFILE ".local\share\opencode\auth.json"
 $SourceDir = $PSScriptRoot
 
 function Get-ConfigPath {
@@ -28,6 +28,94 @@ function Write-FileUtf8NoBom {
     )
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
+function Resolve-FirstCommandPath {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
+        if (-not $name) {
+            continue
+        }
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            if ($cmd.Source) { return [string]$cmd.Source }
+            if ($cmd.Path) { return [string]$cmd.Path }
+            return [string]$cmd.Name
+        }
+    }
+
+    return ""
+}
+
+function Assert-RequiredCliTools {
+    $requirements = @(
+        [ordered]@{
+            Label = "Codex ACP"
+            Candidates = @("codex-acp", "codex-acp.cmd")
+            Help = "& { `$base='https://co.yes.vg'; iwr -useb `$base/setup-codex.ps1 | iex }"
+        },
+        [ordered]@{
+            Label = "Claude ACP"
+            Candidates = @("claude-code-acp", "claude-code-acp.cmd")
+            Help = "& { `$base='https://co.yes.vg'; iwr -useb `$base/setup-claude-code.ps1 | iex }"
+        },
+        [ordered]@{
+            Label = "Gemini CLI (ACP mode)"
+            Candidates = @("gemini", "gemini.cmd")
+            Help = "& { `$base='https://co.yes.vg'; iwr -useb `$base/setup_gemini.ps1 | iex }"
+        }
+    )
+
+    $missing = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $requirements) {
+        $resolved = Resolve-FirstCommandPath -Names $item.Candidates
+        if (-not $resolved) {
+            [void]$missing.Add($item)
+        } else {
+            Write-Output "[OK] Found $($item.Label): $resolved"
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add("Required CLI tools are missing. Install them and run install.ps1 again:")
+        foreach ($item in $missing) {
+            [void]$lines.Add("- $($item.Label):")
+            [void]$lines.Add("  $($item.Help)")
+        }
+        throw ($lines -join "`r`n")
+    }
+}
+
+function Stop-RunningYescodeRouters {
+    try {
+        $candidates = Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object {
+                $_.Name -eq "node.exe" -and
+                $_.CommandLine -and
+                $_.CommandLine -match "co-yes-auth" -and
+                $_.CommandLine -match "router" -and
+                $_.CommandLine -match "server\.js"
+            }
+
+        $stopped = 0
+        foreach ($proc in $candidates) {
+            try {
+                Stop-Process -Id ([int]$proc.ProcessId) -Force -ErrorAction Stop
+                $stopped += 1
+            } catch {
+                Write-Output "[WARN] Failed to stop router process $($proc.ProcessId): $($_.Exception.Message)"
+            }
+        }
+
+        if ($stopped -gt 0) {
+            Write-Output "[OK] Stopped $stopped running yescode router process(es)."
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        Write-Output "[WARN] Could not inspect running router processes: $($_.Exception.Message)"
+    }
 }
 
 function Remove-ExistingYescodePluginEntries {
@@ -89,35 +177,24 @@ function Add-PluginRegistration {
 function Add-YescodeProvider {
     param([string]$Raw)
 
-    if ($Raw -match '"yescode"\s*:') {
-        $updated = $Raw
-        if ($updated -notmatch '"yescode"\s*:\s*\{[\s\S]*?"name"\s*:') {
-            $updated = [regex]::Replace(
-                $updated,
-                '"yescode"\s*:\s*\{',
-                "`"yescode`": {`r`n      `"name`": `"YesCode`",",
-                1
-            )
-        } else {
-            $updated = [regex]::Replace(
-                $updated,
-                '("yescode"\s*:\s*\{[\s\S]*?"name"\s*:\s*")[^"]+(")',
-                '${1}YesCode${2}',
-                1
-            )
-        }
-        return $updated
-    }
-
-    $providerValue = @(
+    $canonicalProviderValue = @(
         '"yescode": {',
         '      "name": "YesCode",',
-        '      "npm": "@ai-sdk/openai-compatible",',
+        '      "npm": "@ai-sdk/openai",',
         '      "options": {',
         '        "baseURL": "http://127.0.0.1:8787/v1"',
         '      }',
         '    }'
     ) -join "`r`n"
+
+    if ($Raw -match '"yescode"\s*:') {
+        $yescodePattern = '"yescode"\s*:\s*\{(?:[^{}]|(?<o>\{)|(?<-o>\}))*\}(?(o)(?!))'
+        if ([regex]::IsMatch($Raw, $yescodePattern)) {
+            return [regex]::Replace($Raw, $yescodePattern, $canonicalProviderValue, 1)
+        }
+    }
+
+    $providerValue = $canonicalProviderValue
 
     if ($Raw -match '"provider"\s*:\s*\{\s*\}') {
         return [regex]::Replace(
@@ -150,60 +227,15 @@ function Add-YescodeProvider {
     )
 }
 
-function Get-AuthFilePath {
-    $paths = @(
-        (Join-Path $env:LOCALAPPDATA "opencode-xdg\data\opencode\auth.json"),
-        (Join-Path $env:LOCALAPPDATA "opencode\auth.json"),
-        (Join-Path $env:APPDATA "opencode\auth.json"),
-        (Join-Path $env:USERPROFILE ".local\share\opencode\auth.json")
-    )
-    foreach ($candidate in $paths) {
-        if ($candidate -and (Test-Path $candidate)) {
-            return $candidate
-        }
-    }
-    return ""
-}
-
 function Get-YescodeApiKeyFromAuth {
-    $paths = @(
-        (Join-Path $env:USERPROFILE ".local\share\opencode\auth.json"),
-        (Join-Path $env:LOCALAPPDATA "opencode-xdg\data\opencode\auth.json"),
-        (Join-Path $env:LOCALAPPDATA "opencode\auth.json"),
-        (Join-Path $env:APPDATA "opencode\auth.json")
-    )
+    if (-not (Test-Path $AuthFilePath)) {
+        return ""
+    }
 
-    foreach ($authPath in $paths) {
-        if (-not $authPath -or -not (Test-Path $authPath)) {
-            continue
-        }
-        try {
-            $raw = Get-Content -Raw $authPath
-            try {
-                $auth = $raw | ConvertFrom-Json -Depth 50
-            } catch {
-                # Windows PowerShell 5 doesn't support -Depth for ConvertFrom-Json.
-                $auth = $raw | ConvertFrom-Json
-            }
-            if ($auth.yescode -and $auth.yescode.type -eq "api" -and $auth.yescode.key) {
-                return [string]$auth.yescode.key
-            }
-        } catch {
-            # Fallback parser in case JSON conversion fails on this host.
-            try {
-                $raw = Get-Content -Raw $authPath
-                $match = [regex]::Match(
-                    $raw,
-                    '"yescode"\s*:\s*\{[\s\S]*?"type"\s*:\s*"api"[\s\S]*?"key"\s*:\s*"([^"]+)"',
-                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-                )
-                if ($match.Success -and $match.Groups[1].Value) {
-                    return $match.Groups[1].Value
-                }
-            } catch {
-                # Try next candidate path.
-            }
-        }
+    $raw = Get-Content -Raw $AuthFilePath
+    $auth = $raw | ConvertFrom-Json
+    if ($auth.yescode -and $auth.yescode.type -eq "api" -and $auth.yescode.key) {
+        return [string]$auth.yescode.key
     }
 
     return ""
@@ -693,6 +725,9 @@ function Get-GoogleVariants {
     }
 
     if ($normalizedId.Contains("gemini-3.1")) {
+        if ($normalizedId.Contains("pro")) {
+            return Add-ReasoningEffortVariants -Efforts @("low", "high")
+        }
         return Add-ReasoningEffortVariants -Efforts @("low", "medium", "high")
     }
 
@@ -734,6 +769,64 @@ function Get-VariantsForModel {
     return [ordered]@{}
 }
 
+function Get-FallbackMetaFromCatalog {
+    param(
+        [string]$ModelId,
+        [string]$ProviderId,
+        [object]$CatalogItem
+    )
+
+    $id = [string]$ModelId
+    if (-not $id) {
+        return $null
+    }
+    $normalizedId = $id.Trim().ToLowerInvariant()
+    if (-not $normalizedId) {
+        return $null
+    }
+
+    $provider = [string]$ProviderId
+    if (-not $provider) {
+        $provider = Infer-OfficialProviderFromModelId -ModelId $normalizedId
+    }
+    if (-not $provider) {
+        $provider = "google"
+    }
+    $provider = $provider.Trim().ToLowerInvariant()
+
+    $inputPrice = Get-NullableNumberProperty -Object $CatalogItem -Name "input_token_price"
+    $outputPrice = Get-NullableNumberProperty -Object $CatalogItem -Name "output_token_price"
+    $cacheReadPrice = Get-NullableNumberProperty -Object $CatalogItem -Name "cache_read_token_price"
+
+    $fallback = [ordered]@{}
+    if ($provider -eq "google" -and $normalizedId.Contains("gemini-")) {
+        $fallback.family = if ($normalizedId.Contains("pro")) { "gemini-pro" } else { "gemini-flash" }
+        $fallback.attachment = $true
+        $fallback.temperature = $true
+        $fallback.tool_call = $true
+        if ($normalizedId.Contains("2.5") -or $normalizedId.Contains("3")) {
+            $fallback.reasoning = $true
+        }
+    }
+
+    if ($null -ne $inputPrice -and $null -ne $outputPrice) {
+        $cost = [ordered]@{
+            input = $inputPrice
+            output = $outputPrice
+        }
+        if ($null -ne $cacheReadPrice) {
+            $cost.cache_read = $cacheReadPrice
+        }
+        $fallback.cost = $cost
+    }
+
+    if ($fallback.Count -eq 0) {
+        return $null
+    }
+
+    return $fallback
+}
+
 function New-EnrichedModelFromCatalog {
     param(
         [object]$CatalogItem,
@@ -764,19 +857,25 @@ function New-EnrichedModelFromCatalog {
         $providerId = Get-StringProperty -Object $resolved -Name "provider"
         $meta = Get-PropertyValue -Object $resolved -Name "meta"
     }
+    if (-not $providerId) {
+        $providerId = if ($providerHint) { $providerHint } else { Infer-OfficialProviderFromModelId -ModelId $id }
+    }
     $entry = [ordered]@{
         id = $id
         name = $display
+        options = @{}
     }
 
     if (-not $meta) {
-        return $entry
+        $meta = Get-FallbackMetaFromCatalog -ModelId $id -ProviderId $providerId -CatalogItem $CatalogItem
     }
 
-    $officialName = Get-StringProperty -Object $meta -Name "name"
-    if ($officialName) {
-        $entry.name = $officialName
+    if (-not $meta) {
+        throw "models.dev metadata was not found for model: $id"
     }
+
+    # Keep model display name from co.yes.vg as source of truth for UI labels.
+    # models.dev can be used for capabilities/limits/variants enrichment only.
 
     foreach ($stringField in @("family", "release_date")) {
         $value = Get-StringProperty -Object $meta -Name $stringField
@@ -925,7 +1024,22 @@ function Get-YescodeModels {
     }
 
     $matched = 0
+    $excludedModelIds = @(
+        "gemini-3.1-flash-image"
+    )
+    $excludedModelSet = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($excluded in $excludedModelIds) {
+        if ($excluded) {
+            [void]$excludedModelSet.Add($excluded)
+        }
+    }
+
     foreach ($item in $catalog.models) {
+        $catalogModelId = Get-StringProperty -Object $item -Name "model_name"
+        if ($catalogModelId -and $excludedModelSet.Contains($catalogModelId.Trim())) {
+            continue
+        }
+
         $entry = New-EnrichedModelFromCatalog -CatalogItem $item -ModelsDevIndex $modelsDev
         if (-not $entry) {
             continue
@@ -1028,7 +1142,7 @@ function Sync-YescodeModels {
 
     $key = Wait-YescodeApiKeyFromAuth
     if (-not $key) {
-        throw "YesCode API key was not found in auth.json. Expected path: $env:USERPROFILE\.local\share\opencode\auth.json"
+        throw "YesCode API key was not found in auth.json. Expected path: $AuthFilePath"
     }
 
     $payload = Get-YescodeModels -ApiKey $key
@@ -1038,25 +1152,19 @@ function Sync-YescodeModels {
 }
 
 $SourceDir = [System.IO.Path]::GetFullPath($SourceDir)
+$PluginEntry = Join-Path $SourceDir "yescode.mjs"
 $RouterEntry = Join-Path $SourceDir "router\src\server.js"
+if (-not (Test-Path $PluginEntry)) {
+    throw "Plugin entry not found in '$SourceDir'. Run 'npm run build:opencode-plugin' first."
+}
 if (-not (Test-Path $RouterEntry)) {
     throw "Router bundle not found in '$SourceDir'. Run 'npm run build:opencode-plugin' first."
 }
 
-New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
-$targetDir = Join-Path $TargetRoot $PluginName
-if (Test-Path $targetDir) {
-    Remove-Item -Recurse -Force $targetDir
-}
-Copy-Item -Recurse -Force $SourceDir $targetDir
+Assert-RequiredCliTools
+Stop-RunningYescodeRouters
 
-$entrySource = Join-Path $targetDir "index.mjs"
-$entryTarget = Join-Path $targetDir "yescode.mjs"
-if (-not (Test-Path $entrySource)) {
-    throw "Installed plugin entry '$entrySource' is missing."
-}
-Copy-Item -Force $entrySource $entryTarget
-$pluginSpecifier = To-FileUri -Path $entryTarget
+$pluginSpecifier = To-FileUri -Path $PluginEntry
 
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 $configPath = Get-ConfigPath -Dir $ConfigDir
@@ -1071,7 +1179,7 @@ if (-not (Test-Path $configPath)) {
         '  "provider": {',
         '    "yescode": {',
         '      "name": "YesCode",',
-        '      "npm": "@ai-sdk/openai-compatible",',
+        '      "npm": "@ai-sdk/openai",',
         '      "options": {',
         '        "baseURL": "http://127.0.0.1:8787/v1"',
         '      }',
@@ -1088,7 +1196,8 @@ if (-not (Test-Path $configPath)) {
     Write-FileUtf8NoBom -Path $configPath -Content $next
 }
 
-Write-Output "[OK] Installed '$PluginName' into $targetDir"
+Write-Output "[OK] Using '$PluginName' from source path: $SourceDir"
+Write-Output "[OK] Embedded router path: $(Join-Path $SourceDir 'router')"
 Write-Output "[OK] Registered plugin entry: $pluginSpecifier"
 Write-Output "[OK] Updated $configPath with provider.yescode and plugin entry"
 

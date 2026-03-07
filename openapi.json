@@ -228,6 +228,24 @@
           }
         }
       }
+    },
+    "/v1/runtime": {
+      "get": {
+        "summary": "Router runtime stats",
+        "operationId": "runtimeStats",
+        "responses": {
+          "200": {
+            "description": "Current ACP pool runtime state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -292,6 +310,28 @@
           "apiKey": {
             "type": "string",
             "description": "co.yes.vg API key. Optional when COYES_API_KEY or X-API-Key header is set."
+          },
+          "sessionMode": {
+            "type": "string",
+            "enum": [
+              "stateless",
+              "sticky"
+            ],
+            "default": "stateless",
+            "description": "stateless: new ACP session for each request; sticky: reuse ACP session across requests."
+          },
+          "routerSessionId": {
+            "type": "string",
+            "description": "Sticky router session id returned by previous response."
+          },
+          "stickySessionId": {
+            "type": "string",
+            "description": "Alias for routerSessionId."
+          },
+          "releaseSession": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true with sessionMode=sticky, closes sticky session after response."
           }
         }
       },
@@ -335,6 +375,24 @@
           },
           "stderr": {
             "type": "string"
+          },
+          "routedProvider": {
+            "type": "string"
+          },
+          "routerSessionId": {
+            "type": "string"
+          },
+          "pooled": {
+            "type": "boolean"
+          },
+          "workerId": {
+            "type": "string"
+          },
+          "queuedMs": {
+            "type": "integer"
+          },
+          "createdWorker": {
+            "type": "boolean"
           }
         }
       },
@@ -407,7 +465,7 @@
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model id, eg. co-codex/co-claude/co-gemini."
+            "description": "Model id from /v1/models, for example: gpt-5.3-codex, claude-haiku-4-5, gemini-3.1-pro-preview."
           },
           "provider": {
             "type": "string",
@@ -461,6 +519,27 @@
           },
           "apiKey": {
             "type": "string"
+          },
+          "sessionMode": {
+            "type": "string",
+            "enum": [
+              "stateless",
+              "sticky"
+            ]
+          },
+          "routerSessionId": {
+            "type": "string"
+          },
+          "releaseSession": {
+            "type": "boolean"
+          },
+          "promptCacheKey": {
+            "type": "string",
+            "description": "External session key. When present router auto-bridges to sticky ACP session."
+          },
+          "prompt_cache_key": {
+            "type": "string",
+            "description": "snake_case alias for promptCacheKey."
           }
         }
       },
@@ -546,6 +625,27 @@
           },
           "apiKey": {
             "type": "string"
+          },
+          "sessionMode": {
+            "type": "string",
+            "enum": [
+              "stateless",
+              "sticky"
+            ]
+          },
+          "routerSessionId": {
+            "type": "string"
+          },
+          "releaseSession": {
+            "type": "boolean"
+          },
+          "promptCacheKey": {
+            "type": "string",
+            "description": "External session key. When present router auto-bridges to sticky ACP session."
+          },
+          "prompt_cache_key": {
+            "type": "string",
+            "description": "snake_case alias for promptCacheKey."
           }
         }
       },
@@ -589,6 +689,9 @@
           },
           "service": {
             "type": "string"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeStatsResponse"
           }
         }
       },
@@ -605,6 +708,16 @@
             "type": "string"
           }
         }
+      },
+      "RuntimeStatsResponse": {
+        "type": "object",
+        "properties": {
+          "pool": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
       }
     }
   }

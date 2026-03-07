@@ -3,17 +3,23 @@
   "version": "0.1.0",
   "description": "Local OpenAPI router that wraps Codex, Claude, and Gemini CLIs via ACP.",
   "type": "module",
-  "main": "src/server.js",
+  "main": ".build/src/server.js",
   "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:opencode-plugin",
-    "build:opencode-plugin": "node scripts/build-opencode-plugin.mjs",
-    "build:router:exe": "node scripts/build-router-exe.mjs",
-    "set:plugin-version-from-tag": "node scripts/set-plugin-version-from-tag.mjs",
-    "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/router-service.js && node --check src/acp-process.js && node --check src/config.js && node --check src/model-catalog.js && node --check opencode/co-yes-auth/index.mjs && node --check scripts/build-opencode-plugin.mjs && node --check scripts/build-router-exe.mjs && node --check scripts/set-plugin-version-from-tag.mjs"
+    "build:opencode-plugin": "npm run build:ts && node .build/scripts/build-opencode-plugin.js",
+    "build:router:exe": "npm run build:ts && node .build/scripts/build-router-exe.js",
+    "set:plugin-version-from-tag": "npm run build:ts && node .build/scripts/set-plugin-version-from-tag.js",
+    "start": "npm run build:ts && node .build/src/server.js",
+    "check": "npm run typecheck"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   },
   "license": "MIT"
 }

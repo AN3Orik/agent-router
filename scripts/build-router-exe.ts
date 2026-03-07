@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const ROOT = process.cwd();
+const BUILD_ROOT = path.resolve(ROOT, ".build");
 const DIST_DIR = path.resolve(ROOT, "dist", "router");
 const EXE_NAME = process.platform === "win32" ? "agent-router.exe" : "agent-router";
 const EXE_PATH = path.resolve(DIST_DIR, EXE_NAME);
@@ -13,7 +14,7 @@ async function buildRouterExe() {
 
   const result = spawnSync(
     bunBin,
-    ["build", "src/server.js", "--compile", "--outfile", EXE_PATH],
+    ["build", path.resolve(BUILD_ROOT, "src", "server.js"), "--compile", "--outfile", EXE_PATH],
     {
       cwd: ROOT,
       stdio: "inherit"
