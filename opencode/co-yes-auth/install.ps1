@@ -769,6 +769,34 @@ function Get-VariantsForModel {
     return [ordered]@{}
 }
 
+function Apply-OpenCodeDefaultVariantDisables {
+    param(
+        [hashtable]$Variants,
+        [bool]$ReasoningSupported
+    )
+
+    if (-not $ReasoningSupported) {
+        return $Variants
+    }
+
+    if (-not $Variants) {
+        $Variants = [ordered]@{}
+    }
+
+    # OpenCode auto-adds low/medium/high for openai-compatible providers.
+    # Mark unsupported defaults as disabled so only model-valid variants stay visible.
+    $defaultEfforts = @("low", "medium", "high")
+    foreach ($effort in $defaultEfforts) {
+        if (-not $Variants.Contains($effort)) {
+            $Variants[$effort] = [ordered]@{
+                disabled = $true
+            }
+        }
+    }
+
+    return $Variants
+}
+
 function Get-FallbackMetaFromCatalog {
     param(
         [string]$ModelId,
@@ -998,6 +1026,7 @@ function New-EnrichedModelFromCatalog {
     }
 
     $variants = Get-VariantsForModel -ProviderId $providerId -ModelId $id -ReleaseDate $releaseDate -ReasoningSupported $reasoningSupported
+    $variants = Apply-OpenCodeDefaultVariantDisables -Variants $variants -ReasoningSupported $reasoningSupported
     if ($variants -and $variants.Count -gt 0) {
         $entry.variants = $variants
     }

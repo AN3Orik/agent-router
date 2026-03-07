@@ -69,6 +69,7 @@ type AcpProcessOptions = {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  sessionMeta?: Record<string, unknown>;
   permissionMode?: PermissionMode;
   onUpdate?: ((update: SessionUpdate) => void) | null;
 };
@@ -231,6 +232,7 @@ export class AcpProcess {
   private readonly args: string[];
   private readonly env: Record<string, string>;
   private readonly cwd: string;
+  private readonly sessionMeta: Record<string, unknown> | null;
   private permissionMode: PermissionMode;
   private onUpdate: ((update: SessionUpdate) => void) | null;
 
@@ -251,6 +253,7 @@ export class AcpProcess {
     args,
     env,
     cwd,
+    sessionMeta,
     permissionMode = "allow",
     onUpdate = null
   }: AcpProcessOptions) {
@@ -258,6 +261,7 @@ export class AcpProcess {
     this.args = args || [];
     this.env = env || {};
     this.cwd = cwd || process.cwd();
+    this.sessionMeta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : null;
     this.permissionMode = permissionMode;
     this.onUpdate = typeof onUpdate === "function" ? onUpdate : null;
   }
@@ -281,10 +285,23 @@ export class AcpProcess {
     }
 
     const spawnSpec = this.buildSpawnSpec(this.command, this.args);
+    const inheritedEnv: NodeJS.ProcessEnv = { ...process.env };
+    const commandBase = path.basename(this.command || "").toLowerCase();
+    const isCodexAcpCommand =
+      commandBase === "codex-acp" ||
+      commandBase === "codex-acp.cmd" ||
+      commandBase === "codex-acp.exe";
+    if (isCodexAcpCommand) {
+      delete inheritedEnv.CODEX_THREAD_ID;
+      delete inheritedEnv.CODEX_HOME;
+      delete inheritedEnv.CODEX_PROFILE;
+      delete inheritedEnv.CODEX_CONFIG;
+      delete inheritedEnv.CODEX_MANAGED_BY_NPM;
+    }
 
     this.child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
-      env: { ...process.env, ...this.env },
+      env: { ...inheritedEnv, ...this.env },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -375,10 +392,14 @@ export class AcpProcess {
   }
 
   async newSession(cwd?: string): Promise<any> {
-    const session = await this.request("session/new", {
+    const payload: Record<string, unknown> = {
       cwd: path.resolve(cwd || this.cwd),
       mcpServers: []
-    });
+    };
+    if (this.sessionMeta) {
+      payload._meta = this.sessionMeta;
+    }
+    const session = await this.request("session/new", payload);
     this.sessionId = String(session.sessionId || "");
     return session;
   }

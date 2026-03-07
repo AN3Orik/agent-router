@@ -500,6 +500,37 @@ function mapFinishReason(stopReason) {
   return "stop";
 }
 
+function isReasoningUpdate(update) {
+  const sessionUpdate = String(update?.sessionUpdate || "").toLowerCase();
+  const contentType = String(update?.content?.type || "").toLowerCase();
+  if (contentType === "reasoning" || contentType === "thought") {
+    return true;
+  }
+  return (
+    sessionUpdate === "agent_thought_chunk" ||
+    sessionUpdate === "agent_reasoning_chunk" ||
+    sessionUpdate.includes("thought") ||
+    sessionUpdate.includes("reasoning")
+  );
+}
+
+function extractReasoningTextFromUpdates(updates) {
+  if (!Array.isArray(updates) || updates.length === 0) {
+    return "";
+  }
+  let reasoning = "";
+  for (const update of updates) {
+    if (!isReasoningUpdate(update)) {
+      continue;
+    }
+    const chunk = update?.content?.text;
+    if (typeof chunk === "string" && chunk) {
+      reasoning += chunk;
+    }
+  }
+  return reasoning.trim();
+}
+
 function getReasoningEffortFromBody(body) {
   if (!body || typeof body !== "object") {
     return undefined;
@@ -515,6 +546,27 @@ function getReasoningEffortFromBody(body) {
     const effort = reasoning.effort ?? reasoning.reasoning_effort;
     if (typeof effort === "string" && effort.trim()) {
       return effort.trim().toLowerCase();
+    }
+  }
+
+  return undefined;
+}
+
+function getReasoningSummaryFromBody(body) {
+  if (!body || typeof body !== "object") {
+    return undefined;
+  }
+
+  const direct = body.reasoningSummary ?? body.reasoning_summary;
+  if (typeof direct === "string" && direct.trim()) {
+    return direct.trim().toLowerCase();
+  }
+
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === "object") {
+    const summary = reasoning.summary ?? reasoning.reasoning_summary;
+    if (typeof summary === "string" && summary.trim()) {
+      return summary.trim().toLowerCase();
     }
   }
 
@@ -746,8 +798,17 @@ function makeChatCompletion({
   created,
   model,
   text,
-  finishReason
+  finishReason,
+  reasoningText
 }) {
+  const message: any = {
+    role: "assistant",
+    content: text
+  };
+  if (typeof reasoningText === "string" && reasoningText.trim()) {
+    message.reasoning_content = reasoningText;
+  }
+
   return {
     id,
     object: "chat.completion",
@@ -756,10 +817,7 @@ function makeChatCompletion({
     choices: [
       {
         index: 0,
-        message: {
-          role: "assistant",
-          content: text
-        },
+        message,
         finish_reason: finishReason
       }
     ]
@@ -883,11 +941,13 @@ const server = http.createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const apiKey = resolveApiKey(body.apiKey, extractHeaderApiKey(req));
       const reasoningEffort = getReasoningEffortFromBody(body);
+      const reasoningSummary = getReasoningSummaryFromBody(body);
       const fallbackCwd = extractHeaderCwd(req);
       const result = await runProviderPrompt({
         ...body,
         cwd: body.cwd || fallbackCwd,
         reasoningEffort,
+        reasoningSummary,
         apiKey
       });
       sendJson(res, 200, result);
@@ -898,6 +958,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const apiKey = resolveApiKey(body.apiKey, extractHeaderApiKey(req));
       const reasoningEffort = getReasoningEffortFromBody(body);
+      const reasoningSummary = getReasoningSummaryFromBody(body);
       const fallbackCwd = extractHeaderCwd(req);
       const abortController = new AbortController();
       let clientDisconnected = false;
@@ -924,11 +985,16 @@ const server = http.createServer(async (req, res) => {
           ...body,
           cwd: body.cwd || fallbackCwd,
           reasoningEffort,
+          reasoningSummary,
           apiKey,
           signal: abortController.signal,
           onEvent: (evt) => {
             if (evt?.type === "token") {
               writeSseEvent(res, "token", evt);
+              return;
+            }
+            if (evt?.type === "reasoning_token") {
+              writeSseEvent(res, "reasoning", evt);
               return;
             }
             writeSseEvent(res, "event", evt);
@@ -958,6 +1024,7 @@ const server = http.createServer(async (req, res) => {
       const apiKey = resolveApiKey(body.apiKey, extractHeaderApiKey(req));
       const fallbackCwd = extractHeaderCwd(req);
       const reasoningEffort = getReasoningEffortFromBody(body);
+      const reasoningSummary = getReasoningSummaryFromBody(body);
       const resolved = await resolveProviderAndModel({
         provider: body.provider,
         model: body.model,
@@ -1013,31 +1080,50 @@ const server = http.createServer(async (req, res) => {
               timeoutMs: body.timeoutMs,
               permissionMode: body.permissionMode,
               reasoningEffort,
+              reasoningSummary,
               sessionMode: routing.sessionMode,
               routerSessionId: routing.routerSessionId,
               releaseSession: routing.releaseSession,
               apiKey,
               signal: abortController.signal,
               onEvent: (evt) => {
-                if (evt?.type !== "token" || !evt.text) {
+                if (evt?.type === "reasoning_token" && evt.text) {
+                  writeSseData(
+                    res,
+                    JSON.stringify({
+                      id: completionId,
+                      object: "chat.completion.chunk",
+                      created,
+                      model,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: { reasoning_content: evt.text },
+                          finish_reason: null
+                        }
+                      ]
+                    })
+                  );
                   return;
                 }
-                writeSseData(
-                  res,
-                  JSON.stringify({
-                    id: completionId,
-                    object: "chat.completion.chunk",
-                    created,
-                    model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { content: evt.text },
-                        finish_reason: null
-                      }
-                    ]
-                  })
-                );
+                if (evt?.type === "token" && evt.text) {
+                  writeSseData(
+                    res,
+                    JSON.stringify({
+                      id: completionId,
+                      object: "chat.completion.chunk",
+                      created,
+                      model,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: { content: evt.text },
+                          finish_reason: null
+                        }
+                      ]
+                    })
+                  );
+                }
               }
             });
 
@@ -1112,9 +1198,11 @@ const server = http.createServer(async (req, res) => {
           timeoutMs: body.timeoutMs,
           permissionMode: body.permissionMode,
           reasoningEffort,
+          reasoningSummary,
           sessionMode: routing.sessionMode,
           routerSessionId: routing.routerSessionId,
           releaseSession: routing.releaseSession,
+          includeEvents: true,
           apiKey
         });
 
@@ -1137,6 +1225,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       finalizeSessionRouting(sessionRouting, result);
+      const reasoningText = extractReasoningTextFromUpdates(result?.updates);
 
       sendJson(
         res,
@@ -1146,7 +1235,8 @@ const server = http.createServer(async (req, res) => {
           created: nowUnix(),
           model: result.model || model || "auto",
           text: result.outputText,
-          finishReason: mapFinishReason(result.stopReason)
+          finishReason: mapFinishReason(result.stopReason),
+          reasoningText
         })
       );
       return;
@@ -1157,6 +1247,7 @@ const server = http.createServer(async (req, res) => {
       const apiKey = resolveApiKey(body.apiKey, extractHeaderApiKey(req));
       const fallbackCwd = extractHeaderCwd(req);
       const reasoningEffort = getReasoningEffortFromBody(body);
+      const reasoningSummary = getReasoningSummaryFromBody(body);
       const resolved = await resolveProviderAndModel({
         provider: body.provider,
         model: body.model,
@@ -1179,6 +1270,7 @@ const server = http.createServer(async (req, res) => {
         const streamedOutputItems = [];
         let nextOutputIndex = 0;
         let currentAssistantMessage = null;
+        let currentReasoningItem = null;
         req.on("close", () => abortController.abort());
 
         beginSse(res);
@@ -1252,6 +1344,71 @@ const server = http.createServer(async (req, res) => {
           });
         };
 
+        const openReasoningItem = () => {
+          if (currentReasoningItem) {
+            return currentReasoningItem;
+          }
+          const item = {
+            id: `rsn_${crypto.randomUUID().replace(/-/g, "")}`,
+            outputIndex: nextOutputIndex++,
+            summaryIndex: 0,
+            text: ""
+          };
+          currentReasoningItem = item;
+          writeSseData(
+            res,
+            JSON.stringify({
+              type: "response.output_item.added",
+              output_index: item.outputIndex,
+              item: {
+                type: "reasoning",
+                id: item.id,
+                encrypted_content: null
+              }
+            })
+          );
+          writeSseData(
+            res,
+            JSON.stringify({
+              type: "response.reasoning_summary_part.added",
+              item_id: item.id,
+              summary_index: item.summaryIndex
+            })
+          );
+          return item;
+        };
+
+        const closeReasoningItem = () => {
+          if (!currentReasoningItem) {
+            return;
+          }
+          const item = currentReasoningItem;
+          currentReasoningItem = null;
+          writeSseData(
+            res,
+            JSON.stringify({
+              type: "response.output_item.done",
+              output_index: item.outputIndex,
+              item: {
+                type: "reasoning",
+                id: item.id,
+                encrypted_content: null
+              }
+            })
+          );
+          streamedOutputItems.push({
+            id: item.id,
+            type: "reasoning",
+            encrypted_content: null,
+            summary: [
+              {
+                type: "summary_text",
+                text: item.text
+              }
+            ]
+          });
+        };
+
         const heartbeat = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": ping\n\n");
@@ -1268,15 +1425,31 @@ const server = http.createServer(async (req, res) => {
               timeoutMs: body.timeoutMs,
               permissionMode: body.permissionMode,
               reasoningEffort,
+              reasoningSummary,
               sessionMode: routing.sessionMode,
               routerSessionId: routing.routerSessionId,
               releaseSession: routing.releaseSession,
               apiKey,
               signal: abortController.signal,
               onEvent: (evt) => {
+                if (evt?.type === "reasoning_token" && evt.text) {
+                  const reasoningItem = openReasoningItem();
+                  reasoningItem.text += evt.text;
+                  writeSseData(
+                    res,
+                    JSON.stringify({
+                      type: "response.reasoning_summary_text.delta",
+                      item_id: reasoningItem.id,
+                      summary_index: reasoningItem.summaryIndex,
+                      delta: evt.text
+                    })
+                  );
+                  return;
+                }
                 if (evt?.type !== "token" || !evt.text) {
                   return;
                 }
+                closeReasoningItem();
                 const message = openAssistantMessage();
                 message.text += evt.text;
                 writeSseData(
@@ -1310,6 +1483,7 @@ const server = http.createServer(async (req, res) => {
           }
           finalizeSessionRouting(sessionRouting, result);
 
+          closeReasoningItem();
           closeAssistantMessage();
           if (
             streamedOutputItems.findIndex((item) => item?.type === "message") === -1
@@ -1378,9 +1552,11 @@ const server = http.createServer(async (req, res) => {
           timeoutMs: body.timeoutMs,
           permissionMode: body.permissionMode,
           reasoningEffort,
+          reasoningSummary,
           sessionMode: routing.sessionMode,
           routerSessionId: routing.routerSessionId,
           releaseSession: routing.releaseSession,
+          includeEvents: true,
           apiKey
         });
 
@@ -1403,6 +1579,34 @@ const server = http.createServer(async (req, res) => {
         }
       }
       finalizeSessionRouting(sessionRouting, result);
+      const reasoningText = extractReasoningTextFromUpdates(result?.updates);
+      const outputItems = [];
+      if (reasoningText) {
+        outputItems.push({
+          id: `rsn_${crypto.randomUUID().replace(/-/g, "")}`,
+          type: "reasoning",
+          encrypted_content: null,
+          summary: [
+            {
+              type: "summary_text",
+              text: reasoningText
+            }
+          ]
+        });
+      }
+      outputItems.push({
+        id: `msg_${crypto.randomUUID().replace(/-/g, "")}`,
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: String(result.outputText || ""),
+            annotations: []
+          }
+        ]
+      });
 
       sendJson(
         res,
@@ -1412,7 +1616,8 @@ const server = http.createServer(async (req, res) => {
           createdAt: nowUnix(),
           model: result.model || model || "auto",
           text: result.outputText,
-          stopReason: result.stopReason
+          stopReason: result.stopReason,
+          outputItems
         })
       );
       return;

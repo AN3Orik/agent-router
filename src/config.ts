@@ -39,6 +39,7 @@ type ProviderId = "codex" | "claude" | "gemini";
 
 type RuntimeOptions = {
   reasoningEffort?: string;
+  reasoningSummary?: string;
 };
 
 export type ProviderRuntime = {
@@ -46,6 +47,7 @@ export type ProviderRuntime = {
   command: string;
   args: string[];
   env: Record<string, string>;
+  sessionMeta?: Record<string, unknown>;
   cleanup?: () => void;
 };
 
@@ -175,6 +177,13 @@ function normalizeReasoningEffort(value: unknown): string {
   }
   const effort = value.trim().toLowerCase();
   return effort;
+}
+
+function normalizeReasoningSummary(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().toLowerCase();
 }
 
 function resolveGeminiThinkingConfig({
@@ -351,6 +360,28 @@ function validateReasoningEffort(
   throw new Error(`Unsupported provider: ${provider}`);
 }
 
+function validateReasoningSummary(
+  provider: ProviderId,
+  reasoningSummary?: string
+): string {
+  const normalized = normalizeReasoningSummary(reasoningSummary);
+  if (!normalized) {
+    return "";
+  }
+
+  if (provider !== "codex") {
+    return "";
+  }
+
+  if (!["auto", "concise", "detailed", "none"].includes(normalized)) {
+    throw new Error(
+      `Unsupported reasoningSummary "${normalized}" for Codex. Use: auto | concise | detailed | none.`
+    );
+  }
+
+  return normalized;
+}
+
 export function resolveProviderRuntimePlan(
   provider: ProviderId,
   apiKey: string,
@@ -370,10 +401,15 @@ export function resolveProviderRuntimePlan(
     selectedModel,
     options.reasoningEffort
   );
+  const reasoningSummary = validateReasoningSummary(
+    provider,
+    options.reasoningSummary
+  );
   const keySeed = [
     provider,
     selectedModel,
     reasoningEffort || "-",
+    reasoningSummary || "-",
     crypto
       .createHash("sha256")
       .update(normalizedApiKey)
@@ -388,7 +424,8 @@ export function resolveProviderRuntimePlan(
     runtimeKey: keySeed,
     createRuntime: () =>
       buildProviderRuntime(provider, normalizedApiKey, selectedModel, {
-        reasoningEffort
+        reasoningEffort,
+        reasoningSummary
       })
   };
 }
@@ -444,6 +481,10 @@ export function buildProviderRuntime(
       selectedModel,
       options.reasoningEffort
     );
+    const reasoningSummary = validateReasoningSummary(
+      provider,
+      options.reasoningSummary
+    );
     const command =
       process.platform === "win32"
         ? resolveWindowsCliCommand({
@@ -469,6 +510,12 @@ export function buildProviderRuntime(
     ];
     if (reasoningEffort) {
       args.push("-c", `model_reasoning_effort=${toTomlStringLiteral(reasoningEffort)}`);
+    }
+    if (reasoningSummary) {
+      args.push("-c", `model_reasoning_summary=${toTomlStringLiteral(reasoningSummary)}`);
+    }
+    if (reasoningEffort || reasoningSummary) {
+      args.push("-c", "model_supports_reasoning_summaries=true");
     }
 
     return {

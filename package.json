@@ -11,6 +11,7 @@
     "build:opencode-plugin": "npm run build:ts && node .build/scripts/build-opencode-plugin.js",
     "build:router:exe": "npm run build:ts && node .build/scripts/build-router-exe.js",
     "set:plugin-version-from-tag": "npm run build:ts && node .build/scripts/set-plugin-version-from-tag.js",
+    "smoke:router": "npm run build:ts && node .build/scripts/smoke-router-run.js",
     "start": "npm run build:ts && node .build/src/server.js",
     "check": "npm run typecheck"
   },

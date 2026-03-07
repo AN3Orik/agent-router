@@ -19,6 +19,12 @@ const VALID_REASONING_EFFORTS = new Set([
   "xhigh",
   "max"
 ]);
+const VALID_REASONING_SUMMARIES = new Set([
+  "auto",
+  "concise",
+  "detailed",
+  "none"
+]);
 
 const WORKER_POOL = APP_CONFIG.acpPoolEnabled
   ? new AcpWorkerPool({
@@ -33,13 +39,26 @@ const WORKER_POOL = APP_CONFIG.acpPoolEnabled
     })
   : null;
 
+let poolClosePromise: Promise<void> | null = null;
+
+async function closeWorkerPool(): Promise<void> {
+  if (!WORKER_POOL) {
+    return;
+  }
+  if (!poolClosePromise) {
+    poolClosePromise = WORKER_POOL.close();
+  }
+  await poolClosePromise;
+}
+
+const closePoolOnSignal = () => {
+  void closeWorkerPool();
+};
+
 if (WORKER_POOL) {
-  const closePool = () => {
-    void WORKER_POOL.close();
-  };
-  process.once("SIGINT", closePool);
-  process.once("SIGTERM", closePool);
-  process.once("exit", closePool);
+  process.once("SIGINT", closePoolOnSignal);
+  process.once("SIGTERM", closePoolOnSignal);
+  process.once("exit", closePoolOnSignal);
 }
 
 function resolveYescodeProvider(model: string | undefined) {
@@ -136,6 +155,22 @@ function normalizeReasoningEffort(value: unknown): string | undefined {
   return effort;
 }
 
+function normalizeReasoningSummary(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const summary = String(value).trim().toLowerCase();
+  if (!summary) {
+    return undefined;
+  }
+  if (!VALID_REASONING_SUMMARIES.has(summary)) {
+    throw new Error(
+      `Unsupported reasoningSummary "${value}". Use: ${[...VALID_REASONING_SUMMARIES].join(" | ")}.`
+    );
+  }
+  return summary;
+}
+
 function normalizeSessionMode(value: unknown, hasSessionId: boolean): "stateless" | "sticky" {
   const defaultMode = hasSessionId ? "sticky" : APP_CONFIG.acpSessionMode;
   const mode = String(value || defaultMode || "stateless")
@@ -192,6 +227,7 @@ function normalizeRequest({
   timeoutMs: rawTimeoutMs,
   permissionMode: rawPermissionMode,
   reasoningEffort: rawReasoningEffort,
+  reasoningSummary: rawReasoningSummary,
   sessionMode: rawSessionMode,
   routerSessionId: rawRouterSessionId,
   stickySessionId: rawStickySessionId,
@@ -206,6 +242,7 @@ function normalizeRequest({
   const timeoutMs = normalizeTimeout(rawTimeoutMs);
   const permissionMode = normalizePermissionMode(rawPermissionMode);
   const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  const reasoningSummary = normalizeReasoningSummary(rawReasoningSummary);
   const routerSessionId =
     normalizeRouterSessionId(rawRouterSessionId) ||
     normalizeRouterSessionId(rawStickySessionId);
@@ -220,6 +257,7 @@ function normalizeRequest({
     requestedProvider: provider,
     model,
     reasoningEffort,
+    reasoningSummary,
     message,
     cwd,
     timeoutMs,
@@ -260,6 +298,24 @@ function bindRunnerEvents(runner: any, onEvent?: ((event: any) => void) | null) 
   runner.resetCapturedOutput();
   runner.setUpdateHandler((update) => {
     onEvent?.({ type: "update", update });
+    const sessionUpdate = String(update?.sessionUpdate || "").toLowerCase();
+    const contentType = String(update?.content?.type || "").toLowerCase();
+
+    const isThinkingChunk =
+      contentType === "text" &&
+      (sessionUpdate === "agent_thought_chunk" ||
+        sessionUpdate === "agent_reasoning_chunk" ||
+        sessionUpdate.includes("thought") ||
+        sessionUpdate.includes("reasoning"));
+
+    if (isThinkingChunk) {
+      onEvent?.({
+        type: "reasoning_token",
+        text: update.content.text || ""
+      });
+      return;
+    }
+
     if (
       update.sessionUpdate === "agent_message_chunk" &&
       update.content?.type === "text"
@@ -364,11 +420,13 @@ async function runEphemeral({
   includeEvents,
   apiKey,
   reasoningEffort,
+  reasoningSummary,
   onEvent,
   signal
 }: any) {
   const runtimeConfig = buildProviderRuntime(provider, apiKey, model, {
-    reasoningEffort
+    reasoningEffort,
+    reasoningSummary
   });
   const runner = new AcpProcess({
     ...runtimeConfig,
@@ -430,6 +488,7 @@ async function runPooled({
   includeEvents,
   apiKey,
   reasoningEffort,
+  reasoningSummary,
   onEvent,
   signal,
   sessionMode,
@@ -441,7 +500,8 @@ async function runPooled({
   }
 
   const plan = resolveProviderRuntimePlan(provider, apiKey, model, {
-    reasoningEffort
+    reasoningEffort,
+    reasoningSummary
   });
 
   let stickySession = null;
@@ -571,6 +631,7 @@ async function runInternal({
   includeEvents,
   apiKey,
   reasoningEffort,
+  reasoningSummary,
   onEvent,
   signal,
   sessionMode,
@@ -592,6 +653,7 @@ async function runInternal({
       includeEvents,
       apiKey,
       reasoningEffort,
+      reasoningSummary,
       onEvent,
       signal
     });
@@ -609,6 +671,7 @@ async function runInternal({
       includeEvents,
       apiKey,
       reasoningEffort,
+      reasoningSummary,
       onEvent,
       signal,
       sessionMode,
@@ -662,4 +725,14 @@ export function getRouterRuntimeStats() {
           enabled: false
         }
   };
+}
+
+export async function shutdownRouterRuntime(): Promise<void> {
+  if (!WORKER_POOL) {
+    return;
+  }
+  process.removeListener("SIGINT", closePoolOnSignal);
+  process.removeListener("SIGTERM", closePoolOnSignal);
+  process.removeListener("exit", closePoolOnSignal);
+  await closeWorkerPool();
 }
