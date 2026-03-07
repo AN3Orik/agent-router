@@ -735,7 +735,14 @@ function shouldRetryWithoutRouterSession(error) {
   );
 }
 
-function resolveSessionRouting({ body, provider, model, apiKey }) {
+function resolveSessionRouting({
+  body,
+  provider,
+  model,
+  apiKey,
+  defaultSessionMode,
+  enableAutoBridge
+}) {
   const sessionMode = readSessionMode(body);
   const explicitRouterSessionId = readRouterSessionId(body);
   const releaseSession = getBoolean(
@@ -743,9 +750,15 @@ function resolveSessionRouting({ body, provider, model, apiKey }) {
     false
   );
 
+  const normalizedDefaultSessionMode =
+    defaultSessionMode === "sticky" || defaultSessionMode === "stateless"
+      ? defaultSessionMode
+      : "";
+  const autoBridgeEnabled =
+    OPENAI_AUTO_SESSION_BRIDGE && enableAutoBridge !== false;
   const externalSessionKey = readExternalSessionKey(body);
   const bridgeKey =
-    OPENAI_AUTO_SESSION_BRIDGE && externalSessionKey
+    autoBridgeEnabled && externalSessionKey
       ? buildSessionBridgeKey({
         provider,
         model,
@@ -755,8 +768,17 @@ function resolveSessionRouting({ body, provider, model, apiKey }) {
       : "";
 
   let resolvedMode = sessionMode;
-  if (!resolvedMode && (explicitRouterSessionId || bridgeKey)) {
-    resolvedMode = "sticky";
+  if (!resolvedMode) {
+    if (explicitRouterSessionId) {
+      resolvedMode = "sticky";
+    } else if (normalizedDefaultSessionMode === "sticky") {
+      // Do not create unreachable sticky sessions when no bridge key is available.
+      resolvedMode = bridgeKey ? "sticky" : "stateless";
+    } else if (normalizedDefaultSessionMode) {
+      resolvedMode = normalizedDefaultSessionMode;
+    } else if (bridgeKey) {
+      resolvedMode = "sticky";
+    }
   }
 
   let routerSessionId = explicitRouterSessionId;
@@ -943,13 +965,25 @@ const server = http.createServer(async (req, res) => {
       const reasoningEffort = getReasoningEffortFromBody(body);
       const reasoningSummary = getReasoningSummaryFromBody(body);
       const fallbackCwd = extractHeaderCwd(req);
+      const sessionRouting = resolveSessionRouting({
+        body,
+        provider: String(body.provider || "auto"),
+        model: String(body.model || "auto"),
+        apiKey,
+        defaultSessionMode: "stateless",
+        enableAutoBridge: false
+      });
       const result = await runProviderPrompt({
         ...body,
         cwd: body.cwd || fallbackCwd,
         reasoningEffort,
         reasoningSummary,
+        sessionMode: sessionRouting.sessionMode,
+        routerSessionId: sessionRouting.routerSessionId,
+        releaseSession: sessionRouting.releaseSession,
         apiKey
       });
+      finalizeSessionRouting(sessionRouting, result);
       sendJson(res, 200, result);
       return;
     }
@@ -960,6 +994,14 @@ const server = http.createServer(async (req, res) => {
       const reasoningEffort = getReasoningEffortFromBody(body);
       const reasoningSummary = getReasoningSummaryFromBody(body);
       const fallbackCwd = extractHeaderCwd(req);
+      const sessionRouting = resolveSessionRouting({
+        body,
+        provider: String(body.provider || "auto"),
+        model: String(body.model || "auto"),
+        apiKey,
+        defaultSessionMode: "sticky",
+        enableAutoBridge: true
+      });
       const abortController = new AbortController();
       let clientDisconnected = false;
 
@@ -981,25 +1023,49 @@ const server = http.createServer(async (req, res) => {
       }, 15000);
 
       try {
-        const result = await runProviderPromptStream({
-          ...body,
-          cwd: body.cwd || fallbackCwd,
-          reasoningEffort,
-          reasoningSummary,
-          apiKey,
-          signal: abortController.signal,
-          onEvent: (evt) => {
-            if (evt?.type === "token") {
-              writeSseEvent(res, "token", evt);
-              return;
+        const runStream = (routing) =>
+          runProviderPromptStream({
+            ...body,
+            cwd: body.cwd || fallbackCwd,
+            reasoningEffort,
+            reasoningSummary,
+            sessionMode: routing.sessionMode,
+            routerSessionId: routing.routerSessionId,
+            releaseSession: routing.releaseSession,
+            apiKey,
+            signal: abortController.signal,
+            onEvent: (evt) => {
+              if (evt?.type === "token") {
+                writeSseEvent(res, "token", evt);
+                return;
+              }
+              if (evt?.type === "reasoning_token") {
+                writeSseEvent(res, "reasoning", evt);
+                return;
+              }
+              writeSseEvent(res, "event", evt);
             }
-            if (evt?.type === "reasoning_token") {
-              writeSseEvent(res, "reasoning", evt);
-              return;
-            }
-            writeSseEvent(res, "event", evt);
+          });
+
+        let result;
+        try {
+          result = await runStream(sessionRouting);
+        } catch (err) {
+          if (
+            sessionRouting.routerSessionId &&
+            sessionRouting.bridgeKey &&
+            shouldRetryWithoutRouterSession(err)
+          ) {
+            deleteBridgedRouterSessionId(sessionRouting.bridgeKey);
+            result = await runStream({
+              ...sessionRouting,
+              routerSessionId: undefined
+            });
+          } else {
+            throw err;
           }
-        });
+        }
+        finalizeSessionRouting(sessionRouting, result);
 
         writeSseEvent(res, "done", result);
       } catch (err) {
@@ -1033,14 +1099,17 @@ const server = http.createServer(async (req, res) => {
       const provider = resolved.provider;
       const model = resolved.model || body.model || "auto";
       const prompt = buildPromptBlocksFromMessages(body.messages);
+      const streamRequest = body.stream === true;
       const sessionRouting = resolveSessionRouting({
         body,
         provider,
         model,
-        apiKey
+        apiKey,
+        defaultSessionMode: streamRequest ? "sticky" : "stateless",
+        enableAutoBridge: streamRequest
       });
 
-      if (body.stream === true) {
+      if (streamRequest) {
         const completionId = `chatcmpl_${crypto.randomUUID().replace(/-/g, "")}`;
         const created = nowUnix();
         const abortController = new AbortController();
@@ -1256,14 +1325,17 @@ const server = http.createServer(async (req, res) => {
       const provider = resolved.provider;
       const model = resolved.model || body.model || "auto";
       const prompt = buildPromptBlocksFromInput(body.input ?? body.message ?? body.prompt);
+      const streamRequest = body.stream === true;
       const sessionRouting = resolveSessionRouting({
         body,
         provider,
         model,
-        apiKey
+        apiKey,
+        defaultSessionMode: streamRequest ? "sticky" : "stateless",
+        enableAutoBridge: streamRequest
       });
 
-      if (body.stream === true) {
+      if (streamRequest) {
         const responseId = `resp_${crypto.randomUUID().replace(/-/g, "")}`;
         const createdAt = nowUnix();
         const abortController = new AbortController();
