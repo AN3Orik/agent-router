@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PluginName = "co-yes-auth"
+$PluginName = "opencode-yescode-auth"
 $TargetRoot = "$env:USERPROFILE\.config\opencode\plugins"
 $ConfigDir = "$env:USERPROFILE\.config\opencode"
 $TargetDir = Join-Path $TargetRoot $PluginName
@@ -62,6 +62,8 @@ function Get-YescodeRelatedProcessIds {
             $cmdLower = $cmd.ToLowerInvariant()
             $isRelated =
                 ($normalized -and $cmdLower.Contains($normalized)) -or
+                $cmdLower.Contains("opencode-yescode-auth") -or
+                $cmdLower.Contains("yescode-auth") -or
                 $cmdLower.Contains("co-yes-auth") -or
                 $cmdLower.Contains("agent-router")
 
@@ -151,12 +153,12 @@ function Remove-PluginRegistration {
 
     $updated = [regex]::Replace(
         $Raw,
-        '(?im)^\s*"file://[^"\r\n]*co-yes-auth[^"\r\n]*"\s*,?\s*$',
+        '(?im)^\s*"file://[^"\r\n]*(opencode-yescode-auth|yescode-auth|co-yes-auth)[^"\r\n]*"\s*,?\s*$',
         ""
     )
     $updated = [regex]::Replace(
         $updated,
-        '(?im)^\s*"[^"\r\n]*(co-yes-auth|opencode-yescode-auth)[^"\r\n]*"\s*,?\s*$',
+        '(?im)^\s*"[^"\r\n]*(opencode-yescode-auth|yescode-auth|co-yes-auth)[^"\r\n]*"\s*,?\s*$',
         ""
     )
     $updated = [regex]::Replace(

@@ -169,7 +169,7 @@ Override with env vars:
 
 Full OpenCode plugin integration (auth provider + config example) is in:
 
-- `opencode/co-yes-auth/index.ts`
+- `opencode/opencode-yescode-auth/index.ts`
 - `opencode/README.md`
 
 Build embedded router bundle for the plugin:
@@ -181,9 +181,9 @@ npm run build:opencode-plugin
 
 Build output:
 
-- `dist/opencode/co-yes-auth/`
-- `dist/opencode/co-yes-auth/install.ps1`
-- `dist/opencode/co-yes-auth/uninstall.ps1`
+- `dist/opencode/opencode-yescode-auth/`
+- `dist/opencode/opencode-yescode-auth/install.ps1`
+- `dist/opencode/opencode-yescode-auth/uninstall.ps1`
 
 Installer script also auto-adds `provider.yescode` into OpenCode config
 (`%USERPROFILE%\.config\opencode\opencode.json` or `.jsonc`), adds local plugin

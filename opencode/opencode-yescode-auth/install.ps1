@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PluginName = "co-yes-auth"
+$PluginName = "opencode-yescode-auth"
 $ConfigDir = "$env:USERPROFILE\.config\opencode"
 $AuthFilePath = Join-Path $env:USERPROFILE ".local\share\opencode\auth.json"
 $SourceDir = $PSScriptRoot
@@ -94,7 +94,7 @@ function Stop-RunningYescodeRouters {
             Where-Object {
                 $_.Name -eq "node.exe" -and
                 $_.CommandLine -and
-                $_.CommandLine -match "co-yes-auth" -and
+                $_.CommandLine -match "(opencode-yescode-auth|yescode-auth|co-yes-auth)" -and
                 $_.CommandLine -match "router" -and
                 $_.CommandLine -match "server\.js"
             }
@@ -123,7 +123,7 @@ function Remove-ExistingYescodePluginEntries {
 
     $updated = [regex]::Replace(
         $Raw,
-        '(?im)^\s*"[^"\r\n]*(co-yes-auth|yescode\.mjs|opencode-yescode-auth)[^"\r\n]*"\s*,?\s*$',
+        '(?im)^\s*"[^"\r\n]*(opencode-yescode-auth|yescode-auth|co-yes-auth|yescode\.mjs)[^"\r\n]*"\s*,?\s*$',
         ""
     )
     $updated = [regex]::Replace($updated, ',\s*]', "]")

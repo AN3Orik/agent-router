@@ -3,9 +3,9 @@ import path from "node:path";
 
 const ROOT = process.cwd();
 const BUILD_ROOT = path.resolve(ROOT, ".build");
-const SOURCE_PLUGIN_DIR = path.resolve(ROOT, "opencode", "co-yes-auth");
-const SOURCE_PLUGIN_BUILD_DIR = path.resolve(BUILD_ROOT, "opencode", "co-yes-auth");
-const DIST_PLUGIN_DIR = path.resolve(ROOT, "dist", "opencode", "co-yes-auth");
+const SOURCE_PLUGIN_DIR = path.resolve(ROOT, "opencode", "opencode-yescode-auth");
+const SOURCE_PLUGIN_BUILD_DIR = path.resolve(BUILD_ROOT, "opencode", "opencode-yescode-auth");
+const DIST_PLUGIN_DIR = path.resolve(ROOT, "dist", "opencode", "opencode-yescode-auth");
 const ROUTER_DIR = path.resolve(DIST_PLUGIN_DIR, "router");
 const ROUTER_SRC_DIR = path.resolve(ROUTER_DIR, "src");
 const SOURCE_ROUTER_BUILD_DIR = path.resolve(BUILD_ROOT, "src");

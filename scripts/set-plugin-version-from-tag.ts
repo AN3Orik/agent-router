@@ -5,7 +5,7 @@ const ROOT = process.cwd();
 const PLUGIN_PACKAGE_PATH = path.resolve(
   ROOT,
   "opencode",
-  "co-yes-auth",
+  "opencode-yescode-auth",
   "package.json"
 );
 
