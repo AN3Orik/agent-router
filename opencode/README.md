@@ -1,5 +1,9 @@
 # CliACP Plugin for OpenCode
 
+[![npm version](https://img.shields.io/npm/v/opencode-cli-acp)](https://www.npmjs.com/package/opencode-cli-acp)
+[![npm downloads](https://img.shields.io/npm/dm/opencode-cli-acp)](https://www.npmjs.com/package/opencode-cli-acp)
+[![license](https://img.shields.io/npm/l/opencode-cli-acp)](https://www.npmjs.com/package/opencode-cli-acp)
+
 `opencode-cli-acp` adds one OpenCode provider (`CliACP`) that routes requests to Codex ACP, Claude ACP, and Gemini CLI through a local ACP router.
 
 ## What You Get
