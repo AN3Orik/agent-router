@@ -389,6 +389,14 @@ function toDisplayName(modelId: string): string {
     .trim();
 }
 
+function normalizeModelDisplayName(value: unknown): string {
+  const name = asString(value);
+  if (!name) {
+    return "";
+  }
+  return name.replace(/\s+\(latest\)$/i, "").trim();
+}
+
 function toCatalogModelItemFromId(modelId: string): CatalogModelItem | null {
   const id = asString(modelId).toLowerCase();
   if (!id) {
@@ -411,7 +419,6 @@ function buildEnrichedModelEntry(
   if (!id) {
     return null;
   }
-  const displayName = asString(item.name) || id;
   const providerHint = item.providerHint || inferOfficialProviderFromModelId(id);
   const resolved = resolveModelsDevMeta(modelsDevIndex, id, providerHint);
   if (!resolved) {
@@ -420,6 +427,8 @@ function buildEnrichedModelEntry(
 
   const providerId = resolved.provider;
   const meta = resolved.meta;
+  const displayName =
+    normalizeModelDisplayName(meta?.name) || asString(item.name) || id;
   const entry: Record<string, any> = {
     id,
     name: displayName,
