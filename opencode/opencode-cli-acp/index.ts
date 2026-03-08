@@ -378,30 +378,6 @@ async function ensureRouterRunning({ baseUrl, apiKey, routerEntry, extraEnv }) {
   }
 }
 
-function readApiKey(auth) {
-  if (!auth) {
-    return "";
-  }
-  if (typeof auth === "string") {
-    return auth.trim();
-  }
-  if (typeof auth === "object") {
-    if (typeof auth.key === "string") {
-      const key = auth.key.trim();
-      return key === NATIVE_AUTH_SENTINEL ? "" : key;
-    }
-    if (typeof auth.apiKey === "string") {
-      const key = auth.apiKey.trim();
-      return key === NATIVE_AUTH_SENTINEL ? "" : key;
-    }
-    if (typeof auth.access === "string") {
-      const key = auth.access.trim();
-      return key === NATIVE_AUTH_SENTINEL ? "" : key;
-    }
-  }
-  return "";
-}
-
 function ensureObject(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value;
@@ -507,9 +483,8 @@ function readApiKeyFromAuthEntry(entry) {
   return "";
 }
 
-function readCliAcpAuthKeys(defaultApiKey) {
+function readCliAcpAuthKeys() {
   const keys = {
-    default: defaultApiKey || "",
     codex: "",
     claude: "",
     gemini: ""
@@ -527,7 +502,6 @@ function readCliAcpAuthKeys(defaultApiKey) {
       return keys;
     }
 
-    keys.default = readApiKeyFromAuthEntry(parsed[PROVIDER_ID]) || keys.default;
     keys.codex = readApiKeyFromAuthEntry(parsed[CODEX_AUTH_PROVIDER_ID]);
     keys.claude = readApiKeyFromAuthEntry(parsed[CLAUDE_AUTH_PROVIDER_ID]);
     keys.gemini = readApiKeyFromAuthEntry(parsed[GEMINI_AUTH_PROVIDER_ID]);
@@ -552,20 +526,110 @@ function getProviderBaseUrls(options) {
   };
 }
 
-function selectProviderApiKey(provider, keys) {
-  if (provider === "codex") {
-    return keys.codex || keys.default;
+function normalizeNameValueEntries(record) {
+  const source = ensureObject(record);
+  const entries = [];
+  for (const [rawName, rawValue] of Object.entries(source)) {
+    const name = trimOptional(rawName);
+    if (!name) {
+      continue;
+    }
+    if (rawValue === undefined || rawValue === null) {
+      continue;
+    }
+    entries.push({
+      name,
+      value: String(rawValue)
+    });
   }
-  if (provider === "claude") {
-    return keys.claude || keys.default;
-  }
-  if (provider === "gemini") {
-    return keys.gemini || keys.default;
-  }
-  return keys.default;
+  return entries;
 }
 
-function patchRequestBodyForCliAcp({ body, options, authKeys }) {
+function cloneAcpMcpServers(servers) {
+  if (!Array.isArray(servers)) {
+    return [];
+  }
+  return servers.map((server) => {
+    const copy = { ...server };
+    if (Array.isArray(server?.args)) {
+      copy.args = [...server.args];
+    }
+    if (Array.isArray(server?.headers)) {
+      copy.headers = server.headers.map((entry) => ({ ...entry }));
+    }
+    if (Array.isArray(server?.env)) {
+      copy.env = server.env.map((entry) => ({ ...entry }));
+    }
+    return copy;
+  });
+}
+
+function buildAcpMcpServersFromConfig(configMcp) {
+  const map = ensureObject(configMcp);
+  const servers = [];
+
+  for (const [rawName, rawServer] of Object.entries(map)) {
+    const name = trimOptional(rawName);
+    if (!name) {
+      continue;
+    }
+
+    const server = ensureObject(rawServer);
+    if (server.enabled === false) {
+      continue;
+    }
+
+    const type = trimOptional(server.type).toLowerCase();
+    if (type === "local") {
+      const commandParts = Array.isArray(server.command)
+        ? server.command.map((part) => trimOptional(part)).filter(Boolean)
+        : [];
+      if (commandParts.length === 0) {
+        continue;
+      }
+
+      const local: any = {
+        name,
+        command: commandParts[0],
+        args: commandParts.slice(1),
+        env: normalizeNameValueEntries(server.environment)
+      };
+      servers.push(local);
+      continue;
+    }
+
+    if (type === "remote") {
+      const url = trimOptional(server.url);
+      if (!url) {
+        continue;
+      }
+      const remote: any = {
+        name,
+        type: "http",
+        url,
+        headers: normalizeNameValueEntries(server.headers)
+      };
+      servers.push(remote);
+    }
+  }
+
+  return servers;
+}
+
+function selectProviderApiKey(provider, keys) {
+  if (provider === "codex") {
+    return keys.codex || "";
+  }
+  if (provider === "claude") {
+    return keys.claude || "";
+  }
+  if (provider === "gemini") {
+    return keys.gemini || "";
+  }
+  return "";
+}
+
+function patchRequestBodyForCliAcp({ body, options, authKeys, mcpServers }) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return null;
   }
@@ -597,6 +661,14 @@ function patchRequestBodyForCliAcp({ body, options, authKeys }) {
     next.geminiBaseUrl = providerBaseUrls.gemini;
   }
 
+  if (
+    !Object.prototype.hasOwnProperty.call(next, "mcpServers") &&
+    Array.isArray(mcpServers) &&
+    mcpServers.length > 0
+  ) {
+    next.mcpServers = cloneAcpMcpServers(mcpServers);
+  }
+
   return {
     body: next,
     provider,
@@ -618,6 +690,7 @@ export async function CliAcpAuthPlugin() {
     (typeof pluginInput.worktree === "string" && pluginInput.worktree.trim()) ||
     (typeof pluginInput.directory === "string" && pluginInput.directory.trim()) ||
     "";
+  let configuredMcpServers = [];
 
   return {
     config: async (config) => {
@@ -625,14 +698,13 @@ export async function CliAcpAuthPlugin() {
       const providerMap = ensureObject(currentConfig.provider);
       const existingProvider = ensureObject(providerMap[PROVIDER_ID]);
       const existingOptions = ensureObject(existingProvider.options);
-      const apiKey =
-        trimOptional(existingOptions.apiKey) ||
-        trimOptional(process.env.CLI_ACP_API_KEY);
+      const apiKey = trimOptional(process.env.CLI_ACP_API_KEY);
       const routerEnv = buildRouterEnv({
         pluginWorkdir,
         apiKey,
         options: existingOptions
       });
+      configuredMcpServers = buildAcpMcpServersFromConfig(currentConfig.mcp);
 
       let catalogBaseURL = trimOptional(process.env.CLI_ACP_ROUTER_BASE_URL) || routerBaseUrl;
       if (autoStartRouter && isLocalBaseUrl(catalogBaseURL)) {
@@ -743,26 +815,25 @@ export async function CliAcpAuthPlugin() {
         }
       ],
       async loader(getAuth, provider) {
-        const auth = await getAuth();
-        const apiKey = readApiKey(auth);
+        void getAuth;
 
         const options = provider?.options || {};
         const headers = options.headers || {};
         let baseURL = trimOptional(process.env.CLI_ACP_ROUTER_BASE_URL) || routerBaseUrl;
         const upstreamFetch = options.fetch || fetch;
-        const authKeys = readCliAcpAuthKeys(apiKey);
-        const defaultApiKey = authKeys.default;
-        const sdkApiKey = defaultApiKey || NATIVE_AUTH_SENTINEL;
+        const authKeys = readCliAcpAuthKeys();
+        const globalApiKey = trimOptional(process.env.CLI_ACP_API_KEY);
+        const sdkApiKey = globalApiKey || NATIVE_AUTH_SENTINEL;
         const routerEnv = buildRouterEnv({
           pluginWorkdir,
-          apiKey: defaultApiKey,
+          apiKey: globalApiKey,
           options
         });
 
         if (autoStartRouter && isLocalBaseUrl(baseURL)) {
           baseURL = await ensureRouterRunning({
             baseUrl: baseURL,
-            apiKey,
+            apiKey: globalApiKey,
             routerEntry,
             extraEnv: routerEnv
           });
@@ -781,13 +852,13 @@ export async function CliAcpAuthPlugin() {
             if (autoStartRouter && isLocalBaseUrl(baseURL)) {
               baseURL = await ensureRouterRunning({
                 baseUrl: baseURL,
-                apiKey,
+                apiKey: globalApiKey,
                 routerEntry,
                 extraEnv: routerEnv
               });
             }
             let patchedInit = init || {};
-            let requestApiKey = defaultApiKey;
+            let requestApiKey = globalApiKey;
             const url = getRequestUrl(input);
             const isWriteRequest = (() => {
               if (!url) {
@@ -806,7 +877,8 @@ export async function CliAcpAuthPlugin() {
                 const patched = patchRequestBodyForCliAcp({
                   body,
                   options,
-                  authKeys
+                  authKeys,
+                  mcpServers: configuredMcpServers
                 });
                 if (patched) {
                   requestApiKey = patched.apiKey || requestApiKey;

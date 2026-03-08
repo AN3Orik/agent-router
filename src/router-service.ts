@@ -1,5 +1,9 @@
 import path from "node:path";
-import { AcpProcess } from "./acp-process.js";
+import {
+  AcpProcess,
+  type AcpMcpServer,
+  type AcpNameValue
+} from "./acp-process.js";
 import {
   APP_CONFIG,
   buildProviderRuntime,
@@ -239,6 +243,116 @@ function normalizeBoolean(value: unknown): boolean {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
+function normalizeStringArray(value: unknown, fieldName: string): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array of strings.`);
+  }
+  const result: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`${fieldName}[${index}] must be a non-empty string.`);
+    }
+    result.push(item.trim());
+  }
+  return result;
+}
+
+function normalizeNameValuePairs(value: unknown, fieldName: string): AcpNameValue[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array of {name,value} objects.`);
+  }
+
+  const result: AcpNameValue[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`${fieldName}[${index}] must be an object.`);
+    }
+    const name = String((entry as Record<string, unknown>).name || "").trim();
+    const rawValue = (entry as Record<string, unknown>).value;
+    if (!name) {
+      throw new Error(`${fieldName}[${index}].name is required.`);
+    }
+    if (rawValue === undefined || rawValue === null) {
+      throw new Error(`${fieldName}[${index}].value is required.`);
+    }
+    result.push({
+      name,
+      value: String(rawValue)
+    });
+  }
+  return result;
+}
+
+function normalizeMcpServers(value: unknown): AcpMcpServer[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("mcpServers must be an array.");
+  }
+
+  const result: AcpMcpServer[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`mcpServers[${index}] must be an object.`);
+    }
+    const raw = entry as Record<string, unknown>;
+    const name = String(raw.name || "").trim();
+    if (!name) {
+      throw new Error(`mcpServers[${index}].name is required.`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(raw, "type")) {
+      const inputType = String(raw.type || "").trim().toLowerCase();
+      const type = inputType === "remote" ? "http" : inputType;
+      const url = String(raw.url || "").trim();
+      if (!type) {
+        throw new Error(`mcpServers[${index}].type is required for remote MCP server.`);
+      }
+      if (!url) {
+        throw new Error(`mcpServers[${index}].url is required for remote MCP server.`);
+      }
+      const headers = normalizeNameValuePairs(
+        raw.headers,
+        `mcpServers[${index}].headers`
+      );
+      const remote: AcpMcpServer = {
+        name,
+        type,
+        url,
+        headers
+      }
+      result.push(remote);
+      continue;
+    }
+
+    const command = String(raw.command || "").trim();
+    if (!command) {
+      throw new Error(`mcpServers[${index}].command is required for local MCP server.`);
+    }
+    const args = normalizeStringArray(raw.args, `mcpServers[${index}].args`);
+    const env = normalizeNameValuePairs(raw.env, `mcpServers[${index}].env`);
+    const local: AcpMcpServer = {
+      name,
+      command,
+      args,
+      env
+    }
+    result.push(local);
+  }
+
+  return result;
+}
+
 function normalizeRequest({
   provider: rawProvider,
   message: rawMessage,
@@ -252,7 +366,8 @@ function normalizeRequest({
   routerSessionId: rawRouterSessionId,
   releaseSession: rawReleaseSession,
   baseUrl: rawBaseUrl,
-  geminiBaseUrl: rawGeminiBaseUrl
+  geminiBaseUrl: rawGeminiBaseUrl,
+  mcpServers: rawMcpServers
 }: any) {
   const provider = normalizeProvider(rawProvider);
   const message = normalizeMessage(rawMessage);
@@ -268,6 +383,7 @@ function normalizeRequest({
   const geminiBaseUrl = normalizeBaseUrl(rawGeminiBaseUrl, "geminiBaseUrl");
   const routerSessionId = normalizeRouterSessionId(rawRouterSessionId);
   const sessionMode = normalizeSessionMode(rawSessionMode, Boolean(routerSessionId));
+  const mcpServers = normalizeMcpServers(rawMcpServers);
   if (routerSessionId && sessionMode !== "sticky") {
     throw new Error("routerSessionId can be used only with sessionMode=sticky.");
   }
@@ -285,6 +401,7 @@ function normalizeRequest({
     cwd,
     timeoutMs,
     permissionMode,
+    mcpServers,
     sessionMode,
     routerSessionId,
     releaseSession
@@ -358,6 +475,7 @@ async function executePromptOnRunner({
   cwd,
   timeoutMs,
   permissionMode,
+  mcpServers,
   existingSessionId,
   onEvent,
   signal
@@ -391,7 +509,10 @@ async function executePromptOnRunner({
     let sessionId = existingSessionId;
     if (!sessionId) {
       onEvent?.({ type: "status", stage: "creating_session" });
-      const session = await withAbort(runner.newSession(cwd), signal);
+      const session = await withAbort(
+        runner.newSession(cwd, mcpServers || []),
+        signal
+      );
       sessionId = session.sessionId;
       onEvent?.({ type: "session", sessionId, reused: false });
     } else {
@@ -440,6 +561,7 @@ async function runEphemeral({
   cwd,
   timeoutMs,
   permissionMode,
+  mcpServers,
   includeEvents,
   apiKey,
   reasoningEffort,
@@ -471,6 +593,7 @@ async function runEphemeral({
       cwd,
       timeoutMs,
       permissionMode,
+      mcpServers,
       existingSessionId: "",
       onEvent,
       signal
@@ -512,6 +635,7 @@ async function runPooled({
   cwd,
   timeoutMs,
   permissionMode,
+  mcpServers,
   includeEvents,
   apiKey,
   reasoningEffort,
@@ -591,6 +715,7 @@ async function runPooled({
       cwd,
       timeoutMs,
       permissionMode,
+      mcpServers,
       existingSessionId: resolvedStickySession?.acpSessionId || "",
       onEvent,
       signal
@@ -659,6 +784,7 @@ async function runInternal({
   cwd,
   timeoutMs,
   permissionMode,
+  mcpServers,
   includeEvents,
   apiKey,
   reasoningEffort,
@@ -683,6 +809,7 @@ async function runInternal({
       cwd,
       timeoutMs,
       permissionMode,
+      mcpServers,
       includeEvents,
       apiKey,
       reasoningEffort,
@@ -703,6 +830,7 @@ async function runInternal({
       cwd,
       timeoutMs,
       permissionMode,
+      mcpServers,
       includeEvents,
       apiKey,
       reasoningEffort,

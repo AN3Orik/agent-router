@@ -320,6 +320,14 @@
             "type": "string",
             "description": "Optional upstream API base URL override for Gemini requests."
           },
+          "mcpServers": {
+            "type": "array",
+            "description": "Optional ACP MCP servers forwarded to session/new.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
           "sessionMode": {
             "type": "string",
             "enum": [
@@ -534,6 +542,14 @@
             "type": "string",
             "description": "Optional upstream API base URL override for Gemini requests."
           },
+          "mcpServers": {
+            "type": "array",
+            "description": "Optional ACP MCP servers forwarded to session/new.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
           "sessionMode": {
             "type": "string",
             "enum": [
@@ -648,6 +664,14 @@
           "geminiBaseUrl": {
             "type": "string",
             "description": "Optional upstream API base URL override for Gemini requests."
+          },
+          "mcpServers": {
+            "type": "array",
+            "description": "Optional ACP MCP servers forwarded to session/new.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
           },
           "sessionMode": {
             "type": "string",

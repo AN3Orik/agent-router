@@ -64,6 +64,27 @@ type TerminalCreateParams = {
   outputByteLimit?: number;
 };
 
+export type AcpNameValue = {
+  name: string;
+  value: string;
+};
+
+export type AcpMcpLocalServer = {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: AcpNameValue[];
+};
+
+export type AcpMcpRemoteServer = {
+  name: string;
+  type: string;
+  url: string;
+  headers?: AcpNameValue[];
+};
+
+export type AcpMcpServer = AcpMcpLocalServer | AcpMcpRemoteServer;
+
 type AcpProcessOptions = {
   command: string;
   args?: string[];
@@ -391,10 +412,10 @@ export class AcpProcess {
     });
   }
 
-  async newSession(cwd?: string): Promise<any> {
+  async newSession(cwd?: string, mcpServers: AcpMcpServer[] = []): Promise<any> {
     const payload: Record<string, unknown> = {
       cwd: path.resolve(cwd || this.cwd),
-      mcpServers: []
+      mcpServers: Array.isArray(mcpServers) ? mcpServers : []
     };
     if (this.sessionMeta) {
       payload._meta = this.sessionMeta;
