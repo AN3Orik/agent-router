@@ -212,11 +212,18 @@ function buildRouterEnv({ pluginWorkdir, apiKey, options }) {
     env.DEFAULT_CWD = pluginWorkdir;
   }
 
-  const cliBaseUrl =
-    trimOptional(options?.cliAcpBaseURL) ||
-    trimOptional(process.env.CLI_ACP_BASE_URL);
-  if (cliBaseUrl) {
-    env.CLI_ACP_BASE_URL = cliBaseUrl;
+  const codexBaseUrl =
+    trimOptional(options?.cliAcpCodexBaseURL) ||
+    trimOptional(process.env.CLI_ACP_CODEX_BASE_URL);
+  if (codexBaseUrl) {
+    env.CLI_ACP_CODEX_BASE_URL = codexBaseUrl;
+  }
+
+  const claudeBaseUrl =
+    trimOptional(options?.cliAcpClaudeBaseURL) ||
+    trimOptional(process.env.CLI_ACP_CLAUDE_BASE_URL);
+  if (claudeBaseUrl) {
+    env.CLI_ACP_CLAUDE_BASE_URL = claudeBaseUrl;
   }
 
   const geminiBaseUrl =
@@ -434,6 +441,22 @@ function getRequestUrl(input) {
   return "";
 }
 
+async function fetchRouterModelIds(baseURL): Promise<string[]> {
+  const response = await fetch(`${trimRightSlash(baseURL)}/models`);
+  if (!response.ok) {
+    throw new Error(`Router /v1/models returned HTTP ${response.status}.`);
+  }
+  const payload: any = await response.json();
+  const records = Array.isArray(payload && payload.data) ? payload.data : [];
+  const ids: string[] = records
+    .map((item: any) => trimOptional(item?.id))
+    .filter((item: string): item is string => Boolean(item));
+  if (ids.length === 0) {
+    throw new Error("Router /v1/models returned empty model list.");
+  }
+  return [...new Set<string>(ids)];
+}
+
 function parseJsonBody(init) {
   if (!init || typeof init !== "object" || typeof init.body !== "string") {
     return null;
@@ -516,19 +539,13 @@ function readCliAcpAuthKeys(defaultApiKey) {
 }
 
 function getProviderBaseUrls(options) {
-  const baseFallback =
-    trimOptional(options?.cliAcpBaseURL) ||
-    trimOptional(process.env.CLI_ACP_BASE_URL);
-
   return {
     codex:
       trimOptional(options?.cliAcpCodexBaseURL) ||
-      trimOptional(process.env.CLI_ACP_CODEX_BASE_URL) ||
-      baseFallback,
+      trimOptional(process.env.CLI_ACP_CODEX_BASE_URL),
     claude:
       trimOptional(options?.cliAcpClaudeBaseURL) ||
-      trimOptional(process.env.CLI_ACP_CLAUDE_BASE_URL) ||
-      baseFallback,
+      trimOptional(process.env.CLI_ACP_CLAUDE_BASE_URL),
     gemini:
       trimOptional(options?.cliAcpGeminiBaseURL) ||
       trimOptional(process.env.CLI_ACP_GEMINI_BASE_URL)
@@ -608,21 +625,42 @@ export async function CliAcpAuthPlugin() {
       const providerMap = ensureObject(currentConfig.provider);
       const existingProvider = ensureObject(providerMap[PROVIDER_ID]);
       const existingOptions = ensureObject(existingProvider.options);
+      const apiKey =
+        trimOptional(existingOptions.apiKey) ||
+        trimOptional(process.env.CLI_ACP_API_KEY);
+      const routerEnv = buildRouterEnv({
+        pluginWorkdir,
+        apiKey,
+        options: existingOptions
+      });
+
+      let catalogBaseURL = trimOptional(process.env.CLI_ACP_ROUTER_BASE_URL) || routerBaseUrl;
+      if (autoStartRouter && isLocalBaseUrl(catalogBaseURL)) {
+        catalogBaseURL = await ensureRouterRunning({
+          baseUrl: catalogBaseURL,
+          apiKey,
+          routerEntry,
+          extraEnv: routerEnv
+        });
+      }
+      const modelIds = await fetchRouterModelIds(catalogBaseURL);
 
       const providerPayload = await buildCliAcpProviderConfig({
         existingProvider,
-        cliAcpBaseURL:
-          trimOptional(existingOptions.cliAcpBaseURL) ||
-          trimOptional(process.env.CLI_ACP_BASE_URL),
+        modelIds,
+        cliAcpCodexBaseURL:
+          trimOptional(existingOptions.cliAcpCodexBaseURL) ||
+          trimOptional(process.env.CLI_ACP_CODEX_BASE_URL),
+        cliAcpClaudeBaseURL:
+          trimOptional(existingOptions.cliAcpClaudeBaseURL) ||
+          trimOptional(process.env.CLI_ACP_CLAUDE_BASE_URL),
         cliAcpGeminiBaseURL:
           trimOptional(existingOptions.cliAcpGeminiBaseURL) ||
           trimOptional(process.env.CLI_ACP_GEMINI_BASE_URL),
-        apiKey:
-          trimOptional(existingOptions.apiKey) ||
-          trimOptional(process.env.CLI_ACP_API_KEY)
+        apiKey
       });
-
       providerMap[PROVIDER_ID] = providerPayload.provider;
+
       currentConfig.provider = providerMap;
     },
     auth: {

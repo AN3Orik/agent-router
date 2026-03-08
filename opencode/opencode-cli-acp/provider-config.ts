@@ -75,20 +75,6 @@ function fetchJsonWithTimeout(
     .finally(() => clearTimeout(timer));
 }
 
-function getOfficialProviderFromText(text: string): "" | "openai" | "anthropic" | "google" {
-  const value = text.toLowerCase();
-  if (/\bopenai\b/.test(value)) {
-    return "openai";
-  }
-  if (/\banthropic\b/.test(value)) {
-    return "anthropic";
-  }
-  if (/\bgoogle\b/.test(value)) {
-    return "google";
-  }
-  return "";
-}
-
 function inferOfficialProviderFromModelId(modelId: string): "" | "openai" | "anthropic" | "google" {
   const id = asString(modelId).toLowerCase();
   if (!id) {
@@ -365,19 +351,68 @@ function normalizeModalities(value: unknown): string[] {
   return result;
 }
 
-function buildEnrichedModelEntry(
-  item: Record<string, any>,
-  modelsDevIndex: ModelsDevIndex
-): Record<string, any> | null {
-  const id = asString(item.model_name);
+type CatalogProviderHint = "" | "openai" | "anthropic" | "google";
+
+type CatalogModelItem = {
+  id: string;
+  name: string;
+  providerHint: CatalogProviderHint;
+  description: string;
+};
+
+function toProviderHint(value: unknown): CatalogProviderHint {
+  const normalized = asString(value).toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "openai" || normalized === "codex") {
+    return "openai";
+  }
+  if (normalized === "anthropic" || normalized === "claude") {
+    return "anthropic";
+  }
+  if (normalized === "google" || normalized === "gemini") {
+    return "google";
+  }
+  return "";
+}
+
+function toDisplayName(modelId: string): string {
+  const source = asString(modelId);
+  if (!source) {
+    return "";
+  }
+  return source
+    .replace(/[._/]+/g, " ")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toCatalogModelItemFromId(modelId: string): CatalogModelItem | null {
+  const id = asString(modelId).toLowerCase();
   if (!id) {
     return null;
   }
-  const displayName = asString(item.display_name) || id;
-  const providerHint = getOfficialProviderFromText(
-    [item.description, item.provider_name, item.provider_display].map((part) => asString(part)).join(" ")
-  );
+  const providerHint = toProviderHint(inferOfficialProviderFromModelId(id));
+  return {
+    id,
+    name: toDisplayName(id) || id,
+    providerHint,
+    description: ""
+  };
+}
 
+function buildEnrichedModelEntry(
+  item: CatalogModelItem,
+  modelsDevIndex: ModelsDevIndex
+): Record<string, any> | null {
+  const id = asString(item.id);
+  if (!id) {
+    return null;
+  }
+  const displayName = asString(item.name) || id;
+  const providerHint = item.providerHint || inferOfficialProviderFromModelId(id);
   const resolved = resolveModelsDevMeta(modelsDevIndex, id, providerHint);
   if (!resolved) {
     return null;
@@ -498,48 +533,48 @@ function buildEnrichedModelEntry(
   return entry;
 }
 
-async function buildCliAcpModelsMap(apiKey: string): Promise<{
+async function buildCliAcpModelsMap(input: {
+  modelIds: string[];
+}): Promise<{
   models: Record<string, Record<string, any>>;
   total: number;
   enriched: number;
   skipped: number;
 }> {
-  const modelsDevIndex = await getModelsDevIndex();
-  const headers: Record<string, string> = {};
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-    headers["x-api-key"] = apiKey;
-  }
-  const catalog = await fetchJsonWithTimeout("https://co.yes.vg/api/v1/public/models", {
-    headers,
-    timeoutMs: 20000
-  });
-  const list = Array.isArray(catalog?.models) ? catalog.models : [];
+  const modelIds = Array.isArray(input.modelIds) ? input.modelIds : [];
+  const list = modelIds
+    .map((id) => toCatalogModelItemFromId(id))
+    .filter((item): item is CatalogModelItem => Boolean(item));
   if (list.length === 0) {
-    throw new Error("co.yes.vg /api/v1/public/models returned empty payload.");
+    throw new Error("CliACP model list is empty.");
   }
+  const modelsDevIndex = await getModelsDevIndex();
 
   const excluded = new Set(["gemini-3.1-flash-image"]);
   const map: Record<string, Record<string, any>> = {};
-  let enriched = 0;
+  const unresolved: string[] = [];
   let skipped = 0;
 
   for (const item of list) {
-    const rawId = asString(item?.model_name);
+    const rawId = asString(item?.id);
     if (!rawId || excluded.has(rawId)) {
       continue;
     }
-    const entry = buildEnrichedModelEntry(item as Record<string, any>, modelsDevIndex);
+    const entry = buildEnrichedModelEntry(item as CatalogModelItem, modelsDevIndex);
     if (!entry) {
+      unresolved.push(rawId);
       skipped += 1;
       continue;
     }
     if (!map[entry.id]) {
       map[entry.id] = entry;
-      if (entry.family || entry.limit || entry.modalities) {
-        enriched += 1;
-      }
     }
+  }
+
+  if (unresolved.length > 0) {
+    throw new Error(
+      `models.dev does not contain metadata for: ${unresolved.sort((a, b) => a.localeCompare(b)).join(", ")}`
+    );
   }
 
   const orderedIds = Object.keys(map).sort((a, b) => a.localeCompare(b));
@@ -549,20 +584,22 @@ async function buildCliAcpModelsMap(apiKey: string): Promise<{
   }
 
   if (orderedIds.length === 0) {
-    throw new Error("Resolved zero models from co.yes.vg.");
+    throw new Error("Resolved zero models for CliACP provider.");
   }
 
   return {
     models: orderedMap,
     total: orderedIds.length,
-    enriched,
+    enriched: orderedIds.length,
     skipped
   };
 }
 
 export async function buildCliAcpProviderConfig(input: {
   existingProvider?: Record<string, any>;
-  cliAcpBaseURL?: string;
+  modelIds?: string[];
+  cliAcpCodexBaseURL?: string;
+  cliAcpClaudeBaseURL?: string;
   cliAcpGeminiBaseURL?: string;
   apiKey?: string;
 }): Promise<{
@@ -581,10 +618,16 @@ export async function buildCliAcpProviderConfig(input: {
     ...existingOptions
   };
   delete options.baseURL;
+  delete options.cliAcpBaseURL;
 
-  const cliAcpBaseURL = trimOptional(input.cliAcpBaseURL);
-  if (cliAcpBaseURL) {
-    options.cliAcpBaseURL = cliAcpBaseURL;
+  const cliAcpCodexBaseURL = trimOptional(input.cliAcpCodexBaseURL);
+  if (cliAcpCodexBaseURL) {
+    options.cliAcpCodexBaseURL = cliAcpCodexBaseURL;
+  }
+
+  const cliAcpClaudeBaseURL = trimOptional(input.cliAcpClaudeBaseURL);
+  if (cliAcpClaudeBaseURL) {
+    options.cliAcpClaudeBaseURL = cliAcpClaudeBaseURL;
   }
 
   const cliAcpGeminiBaseURL = trimOptional(input.cliAcpGeminiBaseURL);
@@ -592,8 +635,9 @@ export async function buildCliAcpProviderConfig(input: {
     options.cliAcpGeminiBaseURL = cliAcpGeminiBaseURL;
   }
 
-  const apiKey = trimOptional(input.apiKey);
-  const models = await buildCliAcpModelsMap(apiKey);
+  const models = await buildCliAcpModelsMap({
+    modelIds: Array.isArray(input.modelIds) ? input.modelIds : []
+  });
 
   return {
     provider: {

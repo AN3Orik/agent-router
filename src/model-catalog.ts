@@ -1,4 +1,10 @@
-import { APP_CONFIG } from "./config.js";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { AcpProcess } from "./acp-process.js";
+import { APP_CONFIG, buildProviderRuntime } from "./config.js";
 
 const CACHE_TTL_MS = Number(process.env.MODEL_CATALOG_CACHE_MS || 60000);
 
@@ -21,8 +27,11 @@ let cache: {
   byId: new Map()
 };
 
-function trimSlash(value: string): string {
-  return String(value || "").replace(/\/+$/, "");
+function asErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error || "unknown error");
 }
 
 function inferProviderFromModel(modelId: string): "codex" | "claude" | "gemini" {
@@ -41,7 +50,12 @@ function inferProviderFromModel(modelId: string): "codex" | "claude" | "gemini" 
   return "codex";
 }
 
-function toCatalogRecord(id: string, provider: CatalogModel["provider"], family: string, source: string): CatalogModel {
+function toCatalogRecord(
+  id: string,
+  provider: CatalogModel["provider"],
+  family: string,
+  source: string
+): CatalogModel {
   return {
     id,
     provider,
@@ -50,44 +64,247 @@ function toCatalogRecord(id: string, provider: CatalogModel["provider"], family:
   };
 }
 
-async function fetchJson(url: string, headers: Record<string, string>): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} for ${url}`);
+function resolveCommandPath(candidates: string[]): string {
+  const resolver = process.platform === "win32" ? "where" : "which";
+  for (const candidate of candidates) {
+    const name = String(candidate || "").trim();
+    if (!name) {
+      continue;
     }
-    return await res.json();
+    const result = spawnSync(resolver, [name], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (result.status === 0) {
+      const lines = String(result.stdout || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (lines[0]) {
+        return lines[0];
+      }
+      return name;
+    }
+  }
+  return "";
+}
+
+function normalizeClaudeModelId(rawId: string, name: string, description: string): string {
+  const trimmed = String(rawId || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("claude-")) {
+    return lower;
+  }
+
+  const context = `${name} ${description}`.toLowerCase();
+  const familyMatch = context.match(/\b(sonnet|opus|haiku)\b/);
+  const versionMatch = context.match(/\b(\d+(?:\.\d+)?)\b/);
+  if (familyMatch && versionMatch) {
+    const family = familyMatch[1];
+    const version = versionMatch[1].replace(/\./g, "-");
+    return `claude-${family}-${version}`;
+  }
+
+  return lower.replace(/\[[^\]]+\]/g, "");
+}
+
+function normalizeModelIdForProvider(
+  provider: "codex" | "claude" | "gemini",
+  rawId: string,
+  name: string,
+  description: string
+): string {
+  const id = String(rawId || "").trim();
+  if (!id) {
+    return "";
+  }
+  if (provider === "codex") {
+    return id.split("/")[0].trim().toLowerCase();
+  }
+  if (provider === "claude") {
+    return normalizeClaudeModelId(id, name, description);
+  }
+  return id.toLowerCase();
+}
+
+async function collectAcpModels(
+  provider: "codex" | "claude",
+  apiKey?: string
+): Promise<CatalogModel[]> {
+  const runtime = buildProviderRuntime(provider, apiKey || undefined, "", {});
+  const runner = new AcpProcess({
+    command: runtime.command,
+    args: runtime.args,
+    env: runtime.env,
+    cwd: APP_CONFIG.defaultCwd,
+    sessionMeta: runtime.sessionMeta || null
+  });
+
+  try {
+    await runner.start();
+    await runner.initialize();
+    const session = await runner.newSession(APP_CONFIG.defaultCwd);
+    const available = Array.isArray(session?.models?.availableModels)
+      ? session.models.availableModels
+      : [];
+    if (available.length === 0) {
+      throw new Error(`${provider} CLI returned empty models list.`);
+    }
+
+    const map = new Map<string, CatalogModel>();
+    for (const item of available) {
+      const rawId = String(item?.modelId || item?.id || "").trim();
+      const name = String(item?.name || "").trim();
+      const description = String(item?.description || "").trim();
+      const normalizedId = normalizeModelIdForProvider(
+        provider,
+        rawId,
+        name,
+        description
+      );
+      if (!normalizedId) {
+        continue;
+      }
+      if (!map.has(normalizedId)) {
+        map.set(
+          normalizedId,
+          toCatalogRecord(normalizedId, provider, provider, `acp:${provider}`)
+        );
+      }
+    }
+
+    if (map.size === 0) {
+      throw new Error(`${provider} CLI models could not be normalized.`);
+    }
+
+    return [...map.values()];
   } finally {
-    clearTimeout(timeout);
+    try {
+      await runner.close();
+    } catch {
+      // Ignore close errors on catalog sync.
+    }
+    if (runtime.cleanup) {
+      try {
+        runtime.cleanup();
+      } catch {
+        // Ignore cleanup errors on catalog sync.
+      }
+    }
   }
 }
 
-async function fetchPublicModels(apiKey?: string): Promise<CatalogModel[]> {
-  const headers: Record<string, string> = {};
-  const normalizedApiKey = String(apiKey || "").trim();
-  if (normalizedApiKey) {
-    headers.Authorization = `Bearer ${normalizedApiKey}`;
-    headers["x-api-key"] = normalizedApiKey;
+async function resolveGeminiModelsConfigPath(): Promise<string> {
+  const require = createRequire(import.meta.url);
+  const candidates: string[] = [];
+
+  const pushCandidate = (value: string): void => {
+    const next = String(value || "").trim();
+    if (!next || candidates.includes(next)) {
+      return;
+    }
+    candidates.push(next);
+  };
+
+  for (const request of [
+    "@google/gemini-cli-core/dist/src/config/models.js",
+    "@google/gemini-cli/node_modules/@google/gemini-cli-core/dist/src/config/models.js"
+  ]) {
+    try {
+      pushCandidate(require.resolve(request));
+    } catch {
+      // Ignore unresolved module candidates.
+    }
   }
 
-  const payload = await fetchJson(
-    `${trimSlash(APP_CONFIG.baseUrl)}/api/v1/public/models`,
-    headers
-  );
-
-  const data = Array.isArray(payload?.models) ? payload.models : [];
-  return data
-    .map((item) => String(item?.model_name || "").trim())
-    .filter(Boolean)
-    .map((id) =>
-      toCatalogRecord(id, inferProviderFromModel(id), inferProviderFromModel(id), "public")
+  const geminiCommand = resolveCommandPath(["gemini", "gemini.cmd"]);
+  if (geminiCommand) {
+    const commandDir = path.dirname(geminiCommand);
+    pushCandidate(
+      path.join(
+        commandDir,
+        "node_modules",
+        "@google",
+        "gemini-cli",
+        "node_modules",
+        "@google",
+        "gemini-cli-core",
+        "dist",
+        "src",
+        "config",
+        "models.js"
+      )
     );
+    pushCandidate(
+      path.join(
+        commandDir,
+        "node_modules",
+        "@google",
+        "gemini-cli-core",
+        "dist",
+        "src",
+        "config",
+        "models.js"
+      )
+    );
+  }
+
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Ignore inaccessible paths and continue.
+    }
+  }
+
+  throw new Error(
+    "Cannot locate Gemini CLI model config file (gemini-cli-core/dist/src/config/models.js)."
+  );
+}
+
+async function collectGeminiModelsFromCli(): Promise<CatalogModel[]> {
+  const configPath = await resolveGeminiModelsConfigPath();
+  const mod = await import(pathToFileURL(configPath).href);
+  const setLike = mod?.VALID_GEMINI_MODELS;
+  if (!setLike || typeof setLike[Symbol.iterator] !== "function") {
+    throw new Error("Gemini CLI did not expose VALID_GEMINI_MODELS.");
+  }
+
+  const map = new Map<string, CatalogModel>();
+  for (const item of setLike as Iterable<unknown>) {
+    const id = String(item || "").trim().toLowerCase();
+    if (!id.startsWith("gemini-")) {
+      continue;
+    }
+    if (id.includes("embedding")) {
+      continue;
+    }
+    if (!map.has(id)) {
+      map.set(id, toCatalogRecord(id, "gemini", "gemini", "cli:gemini"));
+    }
+  }
+
+  if (map.size === 0) {
+    throw new Error("Gemini CLI model set is empty.");
+  }
+  return [...map.values()];
+}
+
+async function fetchCliModels(apiKey?: string): Promise<CatalogModel[]> {
+  const [codexModels, claudeModels, geminiModels] = await Promise.all([
+    collectAcpModels("codex", apiKey),
+    collectAcpModels("claude", apiKey),
+    collectGeminiModelsFromCli()
+  ]);
+  const collected = [...codexModels, ...claudeModels, ...geminiModels];
+  if (collected.length === 0) {
+    throw new Error("All CLI model catalogs are empty.");
+  }
+  return collected;
 }
 
 function dedupeModels(models: CatalogModel[]): Map<string, CatalogModel> {
@@ -108,7 +325,6 @@ export async function getModelCatalog(apiKey?: string, forceRefresh = false): Pr
   byId: Map<string, CatalogModel>;
 }> {
   const normalizedApiKey = String(apiKey || "").trim();
-
   const now = Date.now();
   if (
     !forceRefresh &&
@@ -122,12 +338,9 @@ export async function getModelCatalog(apiKey?: string, forceRefresh = false): Pr
     };
   }
 
-  const publicRes = await fetchPublicModels(normalizedApiKey);
-  const collected = Array.isArray(publicRes) ? publicRes : [];
-
-  if (collected.length === 0) {
-    throw new Error("Failed to load model catalog from configured BASE_URL.");
-  }
+  const collected = await fetchCliModels(normalizedApiKey).catch((error) => {
+    throw new Error(`Failed to load model catalog from CLI backends: ${asErrorMessage(error)}`);
+  });
 
   const models = [...dedupeModels(collected).values()].sort((a, b) =>
     a.id.localeCompare(b.id)
@@ -171,31 +384,24 @@ export async function resolveProviderAndModel({
     };
   }
 
-  try {
-    const { byId } = await getModelCatalog(apiKey);
-    const exact = byId.get(requestedModel);
-    if (exact) {
-      return {
-        provider: exact.provider,
-        model: exact.id
-      };
-    }
-
-    const lower = requestedModel.toLowerCase();
-    for (const [id, entry] of byId.entries()) {
-      if (id.toLowerCase() === lower) {
-        return {
-          provider: entry.provider,
-          model: entry.id
-        };
-      }
-    }
-  } catch {
-    // Fall back to provider inference when catalog lookup is unavailable.
+  const { byId } = await getModelCatalog(apiKey);
+  const exact = byId.get(requestedModel);
+  if (exact) {
+    return {
+      provider: exact.provider,
+      model: exact.id
+    };
   }
 
-  return {
-    provider: inferProviderFromModel(requestedModel),
-    model: requestedModel
-  };
+  const lower = requestedModel.toLowerCase();
+  for (const [id, entry] of byId.entries()) {
+    if (id.toLowerCase() === lower) {
+      return {
+        provider: entry.provider,
+        model: entry.id
+      };
+    }
+  }
+
+  throw new Error(`Unknown model "${requestedModel}" for CliACP catalog.`);
 }

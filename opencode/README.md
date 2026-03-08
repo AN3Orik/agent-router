@@ -1,28 +1,52 @@
-# OpenCode plugin: CliACP
+# CliACP Plugin for OpenCode
 
-Use Codex/Claude/Gemini CLIs in OpenCode through one provider: `CliACP`.
+`opencode-cli-acp` adds one OpenCode provider (`CliACP`) that routes requests to Codex ACP, Claude ACP, and Gemini CLI through a local ACP router.
 
-## 1) Build plugin
+## What You Get
+
+- One provider in OpenCode for 3 CLI backends
+- Streaming responses (including reasoning chunks when backend supports it)
+- Separate login methods for each backend (`Codex CLI`, `Claude CLI`, `Gemini CLI`)
+- Automatic local router startup and automatic local port selection
+- Dynamic model catalog from local CLI backends, enriched by `models.dev`
+- Optional per-CLI upstream URL overrides
+
+## Requirements
+
+- Node.js 20+
+- OpenCode installed
+- CLI tools available in `PATH`:
+  - `codex-acp`
+  - `claude-code-acp`
+  - `gemini`
+
+## Installation
+
+### Option A: Install from npm (recommended)
+
+Add plugin to OpenCode config (`~/.config/opencode/opencode.jsonc`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-cli-acp@latest"]
+}
+```
+
+Restart OpenCode.
+
+### Option B: Local development install (from this repository)
 
 ```powershell
 cd H:\GIT\!Libs\agent-router
 npm install
 npm run build:opencode-plugin
-```
-
-Build output:
-- `dist/opencode/opencode-cli-acp/`
-
-## 2) Install plugin
-
-```powershell
 npm run dev:opencode-plugin:install
 ```
 
-This is a local-dev installer. It updates OpenCode config and registers
-plugin entry from current local build.
+This installs plugin entry from local build: `dist/opencode/opencode-cli-acp/`.
 
-## 3) Add credentials in OpenCode
+## Authentication
 
 Run:
 
@@ -30,18 +54,18 @@ Run:
 opencode auth login
 ```
 
-Then choose provider `CliACP`, and pick one of:
-- `Codex CLI`
-- `Claude CLI`
-- `Gemini CLI`
+Then select:
 
-Each option saves its own key separately.
+1. Provider: `CliACP`
+2. Method:
+   - `Codex CLI`
+   - `Claude CLI`
+   - `Gemini CLI`
 
-If a key for some CLI is not set, that CLI can still use its native login session.
+Each method stores its key separately.  
+If a key is missing for some backend, native CLI auth for that backend is used.
 
-## 4) Run
-
-Examples:
+## Usage
 
 ```powershell
 opencode run --model cliacp/gpt-5.3-codex "Respond with exactly OK"
@@ -49,9 +73,9 @@ opencode run --model cliacp/claude-sonnet-4-6 "Respond with exactly OK"
 opencode run --model cliacp/gemini-3.1-pro-preview "Respond with exactly OK"
 ```
 
-## Optional: API URL configuration
+## Configuration
 
-You can set upstream URLs in `C:\Users\<YOU>\.config\opencode\opencode.jsonc`:
+Optional per-CLI upstream API URLs can be set in `~/.config/opencode/opencode.jsonc`:
 
 ```json
 {
@@ -67,18 +91,22 @@ You can set upstream URLs in `C:\Users\<YOU>\.config\opencode\opencode.jsonc`:
 }
 ```
 
-Compatibility options (shared):
-- `cliAcpBaseURL` (shared for Codex + Claude)
-- `cliAcpGeminiBaseURL` (Gemini)
+Model list source:
+- `codex-acp` and `claude-code-acp` via ACP `session/new`
+- `gemini` via installed `gemini-cli-core` model config
 
-## Notes
+## Troubleshooting
 
-- Provider name in UI: `CliACP`.
-- Plugin starts local router automatically.
-- Local router port is selected automatically if default port is busy.
-- `baseURL` for provider is managed by plugin runtime; manual fixed local port config is not required.
+- If `CliACP` does not appear in provider list, restart OpenCode after plugin install.
+- If requests fail with connection errors, verify required CLIs are installed and in `PATH`.
+- If provider auth is missing, run `opencode auth login` and add credentials for the required backend.
+- For local dev reinstall:
 
-## Uninstall
+```powershell
+npm run dev:opencode-plugin:install
+```
+
+## Uninstall (local dev install)
 
 ```powershell
 npm run dev:opencode-plugin:unintstall

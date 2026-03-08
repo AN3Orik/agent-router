@@ -3,7 +3,8 @@ import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-const DEFAULT_CLI_ACP_BASE_URL = "https://co.yes.vg";
+const DEFAULT_CLI_ACP_CODEX_BASE_URL = "https://co.yes.vg";
+const DEFAULT_CLI_ACP_CLAUDE_BASE_URL = "https://co.yes.vg";
 const DEFAULT_CLI_ACP_GEMINI_BASE_URL = "https://co.yes.vg/gemini";
 
 export const APP_CONFIG = {
@@ -12,7 +13,10 @@ export const APP_CONFIG = {
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 180000),
   defaultCwd: path.resolve(process.env.DEFAULT_CWD || process.cwd()),
   includeStderrInResponse: (process.env.INCLUDE_STDERR_IN_RESPONSE || "0") === "1",
-  baseUrl: process.env.CLI_ACP_BASE_URL || DEFAULT_CLI_ACP_BASE_URL,
+  codexBaseUrl:
+    process.env.CLI_ACP_CODEX_BASE_URL || DEFAULT_CLI_ACP_CODEX_BASE_URL,
+  claudeBaseUrl:
+    process.env.CLI_ACP_CLAUDE_BASE_URL || DEFAULT_CLI_ACP_CLAUDE_BASE_URL,
   geminiBaseUrl:
     process.env.CLI_ACP_GEMINI_BASE_URL || DEFAULT_CLI_ACP_GEMINI_BASE_URL,
   acpPoolEnabled: (process.env.ACP_POOL_ENABLED || "1") !== "0",
@@ -488,7 +492,11 @@ export function buildProviderRuntime(
     throw new Error(`No default model is configured for provider: ${provider}`);
   }
   const hasBaseUrlOverride = typeof options.baseUrl === "string" && options.baseUrl.trim();
-  const baseUrl = trimRightSlash(options.baseUrl || (hasApiKey ? APP_CONFIG.baseUrl : ""));
+  const providerDefaultBaseUrl =
+    provider === "codex" ? APP_CONFIG.codexBaseUrl : APP_CONFIG.claudeBaseUrl;
+  const baseUrl = trimRightSlash(
+    options.baseUrl || (hasApiKey ? providerDefaultBaseUrl : "")
+  );
   const geminiBaseUrl = trimRightSlash(
     options.geminiBaseUrl ||
       (hasBaseUrlOverride

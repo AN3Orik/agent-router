@@ -67,7 +67,8 @@ Defaults:
 - Gemini: `https://co.yes.vg/gemini`
 
 Global env overrides:
-- `CLI_ACP_BASE_URL`
+- `CLI_ACP_CODEX_BASE_URL`
+- `CLI_ACP_CLAUDE_BASE_URL`
 - `CLI_ACP_GEMINI_BASE_URL`
 
 Per-request overrides:
