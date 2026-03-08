@@ -7,7 +7,7 @@ import {
 } from "./config.js";
 import { AcpWorkerPool } from "./acp-worker-pool.js";
 
-const VALID_PROVIDERS = new Set(["yescode", "codex", "claude", "gemini"]);
+const VALID_PROVIDERS = new Set(["cliacp", "codex", "claude", "gemini"]);
 const VALID_PERMISSION_MODES = new Set(["allow", "reject"]);
 const VALID_SESSION_MODES = new Set(["stateless", "sticky"]);
 const VALID_REASONING_EFFORTS = new Set([
@@ -61,7 +61,7 @@ if (WORKER_POOL) {
   process.once("exit", closePoolOnSignal);
 }
 
-function resolveYescodeProvider(model: string | undefined) {
+function resolveCliAcpProvider(model: string | undefined) {
   const id = String(model || "").toLowerCase();
   if (id.includes("gemini")) {
     return "gemini";
@@ -77,14 +77,14 @@ function resolveYescodeProvider(model: string | undefined) {
   return "codex";
 }
 
-function normalizeProvider(value: unknown): "yescode" | "codex" | "claude" | "gemini" {
+function normalizeProvider(value: unknown): "cliacp" | "codex" | "claude" | "gemini" {
   const provider = String(value || "").trim().toLowerCase();
   if (!VALID_PROVIDERS.has(provider)) {
     throw new Error(
-      `Unsupported provider "${value}". Use: yescode | codex | claude | gemini.`
+      `Unsupported provider "${value}". Use: cliacp | codex | claude | gemini.`
     );
   }
-  return provider as "yescode" | "codex" | "claude" | "gemini";
+  return provider as "cliacp" | "codex" | "claude" | "gemini";
 }
 
 function normalizeMessage(value: unknown): string | any[] {
@@ -126,6 +126,26 @@ function normalizeModel(value: unknown): string | undefined {
     throw new Error("model must be shorter than 200 characters.");
   }
   return model;
+}
+
+function normalizeBaseUrl(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const url = String(value).trim();
+  if (!url) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`${fieldName} must be a valid absolute URL.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${fieldName} must use http or https protocol.`);
+  }
+  return url;
 }
 
 function normalizeTimeout(value: unknown): number {
@@ -230,22 +250,23 @@ function normalizeRequest({
   reasoningSummary: rawReasoningSummary,
   sessionMode: rawSessionMode,
   routerSessionId: rawRouterSessionId,
-  stickySessionId: rawStickySessionId,
-  releaseSession: rawReleaseSession
+  releaseSession: rawReleaseSession,
+  baseUrl: rawBaseUrl,
+  geminiBaseUrl: rawGeminiBaseUrl
 }: any) {
   const provider = normalizeProvider(rawProvider);
   const message = normalizeMessage(rawMessage);
   const model = normalizeModel(rawModel);
   const effectiveProvider =
-    provider === "yescode" ? resolveYescodeProvider(model) : provider;
+    provider === "cliacp" ? resolveCliAcpProvider(model) : provider;
   const cwd = normalizeCwd(rawCwd);
   const timeoutMs = normalizeTimeout(rawTimeoutMs);
   const permissionMode = normalizePermissionMode(rawPermissionMode);
   const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
   const reasoningSummary = normalizeReasoningSummary(rawReasoningSummary);
-  const routerSessionId =
-    normalizeRouterSessionId(rawRouterSessionId) ||
-    normalizeRouterSessionId(rawStickySessionId);
+  const baseUrl = normalizeBaseUrl(rawBaseUrl, "baseUrl");
+  const geminiBaseUrl = normalizeBaseUrl(rawGeminiBaseUrl, "geminiBaseUrl");
+  const routerSessionId = normalizeRouterSessionId(rawRouterSessionId);
   const sessionMode = normalizeSessionMode(rawSessionMode, Boolean(routerSessionId));
   if (routerSessionId && sessionMode !== "sticky") {
     throw new Error("routerSessionId can be used only with sessionMode=sticky.");
@@ -258,6 +279,8 @@ function normalizeRequest({
     model,
     reasoningEffort,
     reasoningSummary,
+    baseUrl,
+    geminiBaseUrl,
     message,
     cwd,
     timeoutMs,
@@ -421,12 +444,16 @@ async function runEphemeral({
   apiKey,
   reasoningEffort,
   reasoningSummary,
+  baseUrl,
+  geminiBaseUrl,
   onEvent,
   signal
 }: any) {
   const runtimeConfig = buildProviderRuntime(provider, apiKey, model, {
     reasoningEffort,
-    reasoningSummary
+    reasoningSummary,
+    baseUrl,
+    geminiBaseUrl
   });
   const runner = new AcpProcess({
     ...runtimeConfig,
@@ -489,6 +516,8 @@ async function runPooled({
   apiKey,
   reasoningEffort,
   reasoningSummary,
+  baseUrl,
+  geminiBaseUrl,
   onEvent,
   signal,
   sessionMode,
@@ -501,7 +530,9 @@ async function runPooled({
 
   const plan = resolveProviderRuntimePlan(provider, apiKey, model, {
     reasoningEffort,
-    reasoningSummary
+    reasoningSummary,
+    baseUrl,
+    geminiBaseUrl
   });
 
   let stickySession = null;
@@ -632,6 +663,8 @@ async function runInternal({
   apiKey,
   reasoningEffort,
   reasoningSummary,
+  baseUrl,
+  geminiBaseUrl,
   onEvent,
   signal,
   sessionMode,
@@ -654,6 +687,8 @@ async function runInternal({
       apiKey,
       reasoningEffort,
       reasoningSummary,
+      baseUrl,
+      geminiBaseUrl,
       onEvent,
       signal
     });
@@ -672,6 +707,8 @@ async function runInternal({
       apiKey,
       reasoningEffort,
       reasoningSummary,
+      baseUrl,
+      geminiBaseUrl,
       onEvent,
       signal,
       sessionMode,
@@ -714,7 +751,7 @@ export async function runProviderPromptStream({
 }
 
 export function listProviders() {
-  return ["yescode", "codex", "claude", "gemini"];
+  return ["cliacp", "codex", "claude", "gemini"];
 }
 
 export function getRouterRuntimeStats() {

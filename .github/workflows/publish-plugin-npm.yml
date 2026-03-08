@@ -1,0 +1,56 @@
+name: Publish Plugin To npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to publish from (e.g. 1.3.0 or v1.3.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-plugin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve tag input
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag }}"
+          tag="${tag#refs/tags/}"
+          if [ -z "$tag" ]; then
+            echo "Input 'tag' is required" >&2
+            exit 1
+          fi
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout selected tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.value }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set plugin version from selected tag
+        run: npm run set:plugin-version-from-tag -- "${{ steps.tag.outputs.value }}"
+
+      - name: Build OpenCode plugin bundle
+        run: npm run build:opencode-plugin
+
+      - name: Publish plugin package to npm
+        run: npm publish dist/opencode/opencode-cli-acp --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

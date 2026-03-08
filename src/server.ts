@@ -27,7 +27,7 @@ function sendJson(res, statusCode, body) {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,x-api-key,authorization,x-yescode-cwd"
+    "access-control-allow-headers": "content-type,x-api-key,authorization,x-cliacp-cwd"
   });
   res.end(JSON.stringify(body));
 }
@@ -60,7 +60,7 @@ function extractHeaderApiKey(req) {
 }
 
 function extractHeaderCwd(req) {
-  const value = req.headers["x-yescode-cwd"];
+  const value = req.headers["x-cliacp-cwd"];
   if (typeof value === "string" && value.trim()) {
     return value.trim();
   }
@@ -86,7 +86,7 @@ function beginSse(res) {
     "x-accel-buffering": "no",
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,x-api-key,authorization,x-yescode-cwd"
+    "access-control-allow-headers": "content-type,x-api-key,authorization,x-cliacp-cwd"
   });
 }
 
@@ -536,14 +536,14 @@ function getReasoningEffortFromBody(body) {
     return undefined;
   }
 
-  const direct = body.reasoningEffort ?? body.reasoning_effort;
+  const direct = body.reasoningEffort;
   if (typeof direct === "string" && direct.trim()) {
     return direct.trim().toLowerCase();
   }
 
   const reasoning = body.reasoning;
   if (reasoning && typeof reasoning === "object") {
-    const effort = reasoning.effort ?? reasoning.reasoning_effort;
+    const effort = reasoning.effort;
     if (typeof effort === "string" && effort.trim()) {
       return effort.trim().toLowerCase();
     }
@@ -557,14 +557,14 @@ function getReasoningSummaryFromBody(body) {
     return undefined;
   }
 
-  const direct = body.reasoningSummary ?? body.reasoning_summary;
+  const direct = body.reasoningSummary;
   if (typeof direct === "string" && direct.trim()) {
     return direct.trim().toLowerCase();
   }
 
   const reasoning = body.reasoning;
   if (reasoning && typeof reasoning === "object") {
-    const summary = reasoning.summary ?? reasoning.reasoning_summary;
+    const summary = reasoning.summary;
     if (typeof summary === "string" && summary.trim()) {
       return summary.trim().toLowerCase();
     }
@@ -597,7 +597,7 @@ function getBoolean(value, defaultValue = false) {
 }
 
 function readSessionMode(body) {
-  const mode = body?.sessionMode ?? body?.session_mode;
+  const mode = body?.sessionMode;
   if (typeof mode !== "string") {
     return "";
   }
@@ -609,12 +609,7 @@ function readSessionMode(body) {
 }
 
 function readRouterSessionId(body) {
-  const candidates = [
-    body?.routerSessionId,
-    body?.router_session_id,
-    body?.stickySessionId,
-    body?.sticky_session_id
-  ];
+  const candidates = [body?.routerSessionId];
   for (const value of candidates) {
     if (typeof value === "string" && value.trim()) {
       return value.trim();
@@ -632,25 +627,7 @@ function readExternalSessionKey(body) {
     body.metadata && typeof body.metadata === "object" ? body.metadata : {};
   const candidates = [
     body.promptCacheKey,
-    body.prompt_cache_key,
-    body.sessionKey,
-    body.session_key,
-    body.sessionID,
-    body.sessionId,
-    body.conversationId,
-    body.conversation_id,
-    body.threadId,
-    body.thread_id,
-    metadata.promptCacheKey,
-    metadata.prompt_cache_key,
-    metadata.sessionKey,
-    metadata.session_key,
-    metadata.sessionID,
-    metadata.sessionId,
-    metadata.conversationId,
-    metadata.conversation_id,
-    metadata.threadId,
-    metadata.thread_id
+    metadata.promptCacheKey
   ];
 
   for (const value of candidates) {
@@ -662,6 +639,7 @@ function readExternalSessionKey(body) {
   return "";
 }
 
+// Create a stable bridge key for auto-mapping OpenAI-style session keys to router sticky sessions.
 function buildSessionBridgeKey({ provider, model, apiKey, externalSessionKey }) {
   const hash = crypto
     .createHash("sha256")
@@ -746,7 +724,7 @@ function resolveSessionRouting({
   const sessionMode = readSessionMode(body);
   const explicitRouterSessionId = readRouterSessionId(body);
   const releaseSession = getBoolean(
-    body?.releaseSession ?? body?.release_session,
+    body?.releaseSession,
     false
   );
 
@@ -772,7 +750,7 @@ function resolveSessionRouting({
     if (explicitRouterSessionId) {
       resolvedMode = "sticky";
     } else if (normalizedDefaultSessionMode === "sticky") {
-      // Do not create unreachable sticky sessions when no bridge key is available.
+      // Avoid sticky mode if no bridge key is present; client would not be able to resume it.
       resolvedMode = bridgeKey ? "sticky" : "stateless";
     } else if (normalizedDefaultSessionMode) {
       resolvedMode = normalizedDefaultSessionMode;
@@ -794,6 +772,7 @@ function resolveSessionRouting({
   };
 }
 
+// Keep the bridge mapping in sync with sticky session lifecycle.
 function finalizeSessionRouting(routing, result) {
   if (!routing?.bridgeKey) {
     return;
@@ -906,7 +885,7 @@ function toOpenAiModelsResponse(models) {
       id: model.id,
       object: "model",
       created: 1735689600,
-      owned_by: "yescode",
+      owned_by: "cliacp",
       metadata: {
         provider: model.provider,
         family: model.family,
@@ -1150,6 +1129,8 @@ const server = http.createServer(async (req, res) => {
               permissionMode: body.permissionMode,
               reasoningEffort,
               reasoningSummary,
+              baseUrl: body.baseUrl,
+              geminiBaseUrl: body.geminiBaseUrl,
               sessionMode: routing.sessionMode,
               routerSessionId: routing.routerSessionId,
               releaseSession: routing.releaseSession,
@@ -1268,6 +1249,8 @@ const server = http.createServer(async (req, res) => {
           permissionMode: body.permissionMode,
           reasoningEffort,
           reasoningSummary,
+          baseUrl: body.baseUrl,
+          geminiBaseUrl: body.geminiBaseUrl,
           sessionMode: routing.sessionMode,
           routerSessionId: routing.routerSessionId,
           releaseSession: routing.releaseSession,
@@ -1498,6 +1481,8 @@ const server = http.createServer(async (req, res) => {
               permissionMode: body.permissionMode,
               reasoningEffort,
               reasoningSummary,
+              baseUrl: body.baseUrl,
+              geminiBaseUrl: body.geminiBaseUrl,
               sessionMode: routing.sessionMode,
               routerSessionId: routing.routerSessionId,
               releaseSession: routing.releaseSession,
@@ -1625,6 +1610,8 @@ const server = http.createServer(async (req, res) => {
           permissionMode: body.permissionMode,
           reasoningEffort,
           reasoningSummary,
+          baseUrl: body.baseUrl,
+          geminiBaseUrl: body.geminiBaseUrl,
           sessionMode: routing.sessionMode,
           routerSessionId: routing.routerSessionId,
           releaseSession: routing.releaseSession,

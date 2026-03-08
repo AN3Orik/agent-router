@@ -1,0 +1,41 @@
+{
+  "name": "opencode-cli-acp",
+  "version": "0.1.0",
+  "description": "OpenCode auth plugin for CLI ACP with embedded local router bootstrap.",
+  "author": {
+    "name": "Lasevich Anton (ANZO)",
+    "email": "anzo@anzo.host",
+    "url": "https://anzo.host"
+  },
+  "homepage": "https://github.com/AN3Orik/agent-router#readme",
+  "bugs": {
+    "url": "https://github.com/AN3Orik/agent-router/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AN3Orik/agent-router.git"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "cliacp",
+    "acp",
+    "codex",
+    "claude",
+    "gemini",
+    "router",
+    "openai-compatible"
+  ],
+  "type": "module",
+  "main": "cli-acp.mjs",
+  "exports": {
+    ".": "./cli-acp.mjs"
+  },
+  "files": [
+    "cli-acp.mjs",
+    "index.mjs",
+    "provider-config.js",
+    "router/"
+  ],
+  "license": "MIT"
+}

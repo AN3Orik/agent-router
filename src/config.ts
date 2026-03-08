@@ -3,8 +3,8 @@ import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-const DEFAULT_COYES_BASE_URL = "https://co.yes.vg";
-const DEFAULT_COYES_GEMINI_BASE_URL = "https://co.yes.vg/gemini";
+const DEFAULT_CLI_ACP_BASE_URL = "https://co.yes.vg";
+const DEFAULT_CLI_ACP_GEMINI_BASE_URL = "https://co.yes.vg/gemini";
 
 export const APP_CONFIG = {
   host: process.env.HOST || "127.0.0.1",
@@ -12,9 +12,9 @@ export const APP_CONFIG = {
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 180000),
   defaultCwd: path.resolve(process.env.DEFAULT_CWD || process.cwd()),
   includeStderrInResponse: (process.env.INCLUDE_STDERR_IN_RESPONSE || "0") === "1",
-  coYesBaseUrl: process.env.COYES_BASE_URL || DEFAULT_COYES_BASE_URL,
-  coYesGeminiBaseUrl:
-    process.env.COYES_GEMINI_BASE_URL || DEFAULT_COYES_GEMINI_BASE_URL,
+  baseUrl: process.env.CLI_ACP_BASE_URL || DEFAULT_CLI_ACP_BASE_URL,
+  geminiBaseUrl:
+    process.env.CLI_ACP_GEMINI_BASE_URL || DEFAULT_CLI_ACP_GEMINI_BASE_URL,
   acpPoolEnabled: (process.env.ACP_POOL_ENABLED || "1") !== "0",
   acpPoolMaxSize: Number(process.env.ACP_POOL_MAX_SIZE || 2),
   acpPoolMinSize: Number(process.env.ACP_POOL_MIN_SIZE || 0),
@@ -40,6 +40,8 @@ type ProviderId = "codex" | "claude" | "gemini";
 type RuntimeOptions = {
   reasoningEffort?: string;
   reasoningSummary?: string;
+  baseUrl?: string;
+  geminiBaseUrl?: string;
 };
 
 export type ProviderRuntime = {
@@ -58,6 +60,10 @@ export type ProviderRuntimePlan = {
   runtimeKey: string;
   createRuntime: () => ProviderRuntime;
 };
+
+function trimRightSlash(value: string): string {
+  return String(value || "").replace(/\/+$/, "");
+}
 
 function firstExistingFile(candidates: string[]): string {
   for (const candidate of candidates) {
@@ -245,50 +251,86 @@ function resolveGeminiThinkingConfig({
 
 function writeGeminiCliSettings({
   model,
-  reasoningEffort
+  reasoningEffort,
+  forceApiKeyAuth
 }: {
   model: string;
   reasoningEffort?: string;
+  forceApiKeyAuth?: boolean;
 }) {
   const geminiHome = fs.mkdtempSync(path.join(os.tmpdir(), "agent-router-gemini-"));
   const geminiDir = path.join(geminiHome, ".gemini");
-  fs.mkdirSync(geminiDir, { recursive: true });
+  const sourceGeminiCliHome = String(process.env.GEMINI_CLI_HOME || "").trim();
+  const sourceGeminiDir = path.join(sourceGeminiCliHome || os.homedir(), ".gemini");
+  if (!forceApiKeyAuth && fs.existsSync(sourceGeminiDir)) {
+    try {
+      fs.cpSync(sourceGeminiDir, geminiDir, { recursive: true, force: true });
+    } catch {
+      fs.mkdirSync(geminiDir, { recursive: true });
+    }
+  } else {
+    fs.mkdirSync(geminiDir, { recursive: true });
+  }
 
   const effort = normalizeReasoningEffort(reasoningEffort);
   const thinkingConfig = effort
     ? resolveGeminiThinkingConfig({
-      model,
-      reasoningEffort: effort
-    })
+        model,
+        reasoningEffort: effort
+      })
     : null;
 
   const settingsPath = path.join(geminiDir, "settings.json");
-  const settings = {
-    security: {
-      auth: {
-        selectedType: "gemini-api-key"
+  let settings: any = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        settings = parsed;
       }
-    },
-    general: {
-      previewFeatures: true
-    },
-    ...(thinkingConfig
-      ? {
-        modelConfigs: {
-          customOverrides: [
-            {
-              match: { model },
-              modelConfig: {
-                generateContentConfig: {
-                  thinkingConfig
-                }
-              }
-            }
-          ]
+    } catch {
+      settings = {};
+    }
+  }
+
+  if (!settings.general || typeof settings.general !== "object") {
+    settings.general = {};
+  }
+  settings.general.previewFeatures = true;
+
+  if (forceApiKeyAuth) {
+    if (!settings.security || typeof settings.security !== "object") {
+      settings.security = {};
+    }
+    if (!settings.security.auth || typeof settings.security.auth !== "object") {
+      settings.security.auth = {};
+    }
+    settings.security.auth.selectedType = "gemini-api-key";
+  }
+
+  if (thinkingConfig) {
+    if (!settings.modelConfigs || typeof settings.modelConfigs !== "object") {
+      settings.modelConfigs = {};
+    }
+
+    const customOverrides = Array.isArray(settings.modelConfigs.customOverrides)
+      ? settings.modelConfigs.customOverrides.filter(
+          (entry: any) => entry?.match?.model !== model
+        )
+      : [];
+
+    customOverrides.push({
+      match: { model },
+      modelConfig: {
+        generateContentConfig: {
+          thinkingConfig
         }
       }
-      : {})
-  };
+    });
+
+    settings.modelConfigs.customOverrides = customOverrides;
+  }
+
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 
   return {
@@ -303,13 +345,11 @@ function writeGeminiCliSettings({
   };
 }
 
-function normalizeApiKey(apiKey: string): string {
-  if (!apiKey) {
-    throw new Error(
-      "API key is required. Set COYES_API_KEY or pass apiKey in request body/header."
-    );
+function normalizeApiKey(apiKey?: string): string {
+  if (typeof apiKey !== "string") {
+    return "";
   }
-  return String(apiKey);
+  return apiKey.trim();
 }
 
 export function getDefaultModel(provider) {
@@ -384,7 +424,7 @@ function validateReasoningSummary(
 
 export function resolveProviderRuntimePlan(
   provider: ProviderId,
-  apiKey: string,
+  apiKey: string | undefined,
   model: string,
   options: RuntimeOptions = {}
 ): ProviderRuntimePlan {
@@ -412,7 +452,7 @@ export function resolveProviderRuntimePlan(
     reasoningSummary || "-",
     crypto
       .createHash("sha256")
-      .update(normalizedApiKey)
+      .update(normalizedApiKey || "no-api-key")
       .digest("hex")
       .slice(0, 16)
   ].join("|");
@@ -425,18 +465,21 @@ export function resolveProviderRuntimePlan(
     createRuntime: () =>
       buildProviderRuntime(provider, normalizedApiKey, selectedModel, {
         reasoningEffort,
-        reasoningSummary
+        reasoningSummary,
+        baseUrl: options.baseUrl,
+        geminiBaseUrl: options.geminiBaseUrl
       })
   };
 }
 
 export function buildProviderRuntime(
   provider: ProviderId,
-  apiKey: string,
+  apiKey: string | undefined,
   model: string,
   options: RuntimeOptions = {}
 ): ProviderRuntime {
-  normalizeApiKey(apiKey);
+  const normalizedApiKey = normalizeApiKey(apiKey);
+  const hasApiKey = Boolean(normalizedApiKey);
   const selectedModel = normalizeModelForProvider(
     provider,
     model || DEFAULT_MODELS[provider]
@@ -444,6 +487,16 @@ export function buildProviderRuntime(
   if (!selectedModel) {
     throw new Error(`No default model is configured for provider: ${provider}`);
   }
+  const hasBaseUrlOverride = typeof options.baseUrl === "string" && options.baseUrl.trim();
+  const baseUrl = trimRightSlash(options.baseUrl || (hasApiKey ? APP_CONFIG.baseUrl : ""));
+  const geminiBaseUrl = trimRightSlash(
+    options.geminiBaseUrl ||
+      (hasBaseUrlOverride
+        ? `${baseUrl}/gemini`
+        : hasApiKey
+          ? APP_CONFIG.geminiBaseUrl
+          : "")
+  );
 
   if (provider === "claude") {
     const reasoningEffort = validateReasoningEffort(
@@ -455,7 +508,7 @@ export function buildProviderRuntime(
       process.platform === "win32"
         ? resolveWindowsCliCommand({
           baseNames: ["claude-code-acp.cmd", "claude-code-acp"],
-          envOverrides: ["YESCODE_CLAUDE_ACP_PATH", "CLAUDE_CODE_ACP_PATH"]
+          envOverrides: ["CLI_ACP_CLAUDE_ACP_PATH", "CLAUDE_CODE_ACP_PATH"]
         })
         : "claude-code-acp";
     const args = selectedModel ? ["--model", selectedModel] : [];
@@ -463,15 +516,21 @@ export function buildProviderRuntime(
       args.push("--effort", reasoningEffort);
     }
 
+    const env: Record<string, string> = {
+      ANTHROPIC_USER_AGENT: "agent-router/0.1.0 (cli-acp-router)"
+    };
+    if (hasApiKey) {
+      if (baseUrl) {
+        env.ANTHROPIC_BASE_URL = baseUrl;
+      }
+      env.ANTHROPIC_AUTH_TOKEN = normalizedApiKey;
+    }
+
     return {
       model: selectedModel,
       command,
       args,
-      env: {
-        ANTHROPIC_BASE_URL: APP_CONFIG.coYesBaseUrl,
-        ANTHROPIC_AUTH_TOKEN: apiKey,
-        ANTHROPIC_USER_AGENT: "agent-router/0.1.0 (yescode-router)"
-      }
+      env
     };
   }
 
@@ -489,25 +548,26 @@ export function buildProviderRuntime(
       process.platform === "win32"
         ? resolveWindowsCliCommand({
           baseNames: ["codex-acp.cmd", "codex-acp"],
-          envOverrides: ["YESCODE_CODEX_ACP_PATH", "CODEX_ACP_PATH"]
+          envOverrides: ["CLI_ACP_CODEX_ACP_PATH", "CODEX_ACP_PATH"]
         })
         : "codex-acp";
-    const args = [
-      "-c",
-      'model_provider="apirouter"',
-      "-c",
-      `model=${toTomlStringLiteral(selectedModel)}`,
-      "-c",
-      'model_providers.apirouter.name="apirouter"',
-      "-c",
-      `model_providers.apirouter.base_url="${APP_CONFIG.coYesBaseUrl}/v1"`,
-      "-c",
-      'model_providers.apirouter.wire_api="responses"',
-      "-c",
-      "model_providers.apirouter.requires_openai_auth=true",
-      "-c",
-      'model_providers.apirouter.env_key="APIROUTER_API_KEY"'
-    ];
+    const args = ["-c", `model=${toTomlStringLiteral(selectedModel)}`];
+    if (hasApiKey) {
+      args.push(
+        "-c",
+        'model_provider="apirouter"',
+        "-c",
+        'model_providers.apirouter.name="apirouter"',
+        "-c",
+        `model_providers.apirouter.base_url="${baseUrl}/v1"`,
+        "-c",
+        'model_providers.apirouter.wire_api="responses"',
+        "-c",
+        "model_providers.apirouter.requires_openai_auth=true",
+        "-c",
+        'model_providers.apirouter.env_key="APIROUTER_API_KEY"'
+      );
+    }
     if (reasoningEffort) {
       args.push("-c", `model_reasoning_effort=${toTomlStringLiteral(reasoningEffort)}`);
     }
@@ -518,15 +578,19 @@ export function buildProviderRuntime(
       args.push("-c", "model_supports_reasoning_summaries=true");
     }
 
+    const env: Record<string, string> = {
+      HTTP_USER_AGENT: "agent-router/0.1.0 cli-acp-router"
+    };
+    if (hasApiKey) {
+      env.OPENAI_API_KEY = normalizedApiKey;
+      env.APIROUTER_API_KEY = normalizedApiKey;
+    }
+
     return {
       model: selectedModel,
       command,
       args,
-      env: {
-        OPENAI_API_KEY: apiKey,
-        APIROUTER_API_KEY: apiKey,
-        HTTP_USER_AGENT: "agent-router/0.1.0 yescode-router"
-      }
+      env
     };
   }
 
@@ -540,28 +604,40 @@ export function buildProviderRuntime(
       process.platform === "win32"
         ? resolveWindowsCliCommand({
           baseNames: ["gemini.cmd", "gemini"],
-          envOverrides: ["YESCODE_GEMINI_CLI_PATH", "GEMINI_CLI_PATH"]
+          envOverrides: ["CLI_ACP_GEMINI_CLI_PATH", "GEMINI_CLI_PATH"]
         })
         : "gemini";
-    const geminiSetup = writeGeminiCliSettings({
-      model: selectedModel,
-      reasoningEffort
-    });
+    const needsManagedGeminiHome = hasApiKey || Boolean(reasoningEffort);
+    const geminiSetup = needsManagedGeminiHome
+      ? writeGeminiCliSettings({
+        model: selectedModel,
+        reasoningEffort,
+        forceApiKeyAuth: hasApiKey
+      })
+      : null;
+
+    const env: Record<string, string> = {
+      GEMINI_MODEL: selectedModel,
+      HTTP_USER_AGENT: "agent-router/0.1.0 cli-acp-router"
+    };
+    if (geminiSetup?.geminiCliHome) {
+      env.GEMINI_CLI_HOME = geminiSetup.geminiCliHome;
+    }
+    if (hasApiKey) {
+      if (geminiBaseUrl) {
+        env.GOOGLE_GEMINI_BASE_URL = geminiBaseUrl;
+      }
+      env.GEMINI_API_KEY = normalizedApiKey;
+      env.GOOGLE_API_KEY = normalizedApiKey;
+      env.GEMINI_DEFAULT_AUTH_TYPE = "gemini-api-key";
+    }
 
     return {
       model: selectedModel,
       command,
       args: ["--experimental-acp", "--model", selectedModel],
-      env: {
-        GOOGLE_GEMINI_BASE_URL: APP_CONFIG.coYesGeminiBaseUrl,
-        GEMINI_API_KEY: apiKey,
-        GOOGLE_API_KEY: apiKey,
-        GEMINI_MODEL: selectedModel,
-        GEMINI_DEFAULT_AUTH_TYPE: "gemini-api-key",
-        GEMINI_CLI_HOME: geminiSetup.geminiCliHome,
-        HTTP_USER_AGENT: "agent-router/0.1.0 yescode-router"
-      },
-      cleanup: geminiSetup.cleanup
+      env,
+      cleanup: geminiSetup?.cleanup
     };
   }
 
@@ -569,5 +645,15 @@ export function buildProviderRuntime(
 }
 
 export function resolveApiKey(inputApiKey?: string, headerApiKey?: string): string {
-  return inputApiKey || headerApiKey || process.env.COYES_API_KEY || "";
+  const candidates = [inputApiKey, headerApiKey, process.env.CLI_ACP_API_KEY];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const value = candidate.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
 }

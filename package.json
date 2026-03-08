@@ -2,6 +2,19 @@
   "name": "agent-router",
   "version": "0.1.0",
   "description": "Local OpenAPI router that wraps Codex, Claude, and Gemini CLIs via ACP.",
+  "author": {
+    "name": "Lasevich Anton (ANZO)",
+    "email": "anzo@anzo.host",
+    "url": "https://anzo.host"
+  },
+  "homepage": "https://github.com/AN3Orik/agent-router#readme",
+  "bugs": {
+    "url": "https://github.com/AN3Orik/agent-router/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AN3Orik/agent-router.git"
+  },
   "type": "module",
   "main": ".build/src/server.js",
   "scripts": {
@@ -10,6 +23,9 @@
     "build": "npm run build:opencode-plugin",
     "build:opencode-plugin": "npm run build:ts && node .build/scripts/build-opencode-plugin.js",
     "build:router:exe": "npm run build:ts && node .build/scripts/build-router-exe.js",
+    "dev:opencode-plugin:install": "npm run build:ts && node .build/scripts/dev-opencode-plugin-install.js",
+    "dev:opencode-plugin:unintstall": "npm run build:ts && node .build/scripts/dev-opencode-plugin-unintstall.js",
+    "dev:opencode-plugin:uninstall": "npm run dev:opencode-plugin:unintstall",
     "set:plugin-version-from-tag": "npm run build:ts && node .build/scripts/set-plugin-version-from-tag.js",
     "smoke:router": "npm run build:ts && node .build/scripts/smoke-router-run.js",
     "start": "npm run build:ts && node .build/src/server.js",

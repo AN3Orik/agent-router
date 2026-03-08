@@ -1,6 +1,8 @@
-# OpenCode integration (yescode)
+# OpenCode plugin: CliACP
 
-## Build
+Use Codex/Claude/Gemini CLIs in OpenCode through one provider: `CliACP`.
+
+## 1) Build plugin
 
 ```powershell
 cd H:\GIT\!Libs\agent-router
@@ -8,39 +10,76 @@ npm install
 npm run build:opencode-plugin
 ```
 
-Build output: `dist/opencode/opencode-yescode-auth/`.
+Build output:
+- `dist/opencode/opencode-cli-acp/`
 
-Note: this build is for the OpenCode plugin bundle (embedded router).  
-If you need a standalone router executable, use root script:
-
-```powershell
-npm run build:router:exe
-```
-
-Standalone output is a single file: `dist/router/agent-router.exe`.
-
-## Install (one click)
+## 2) Install plugin
 
 ```powershell
-dist\opencode\opencode-yescode-auth\install.ps1
+npm run dev:opencode-plugin:install
 ```
 
-What installer does automatically:
-- copies plugin bundle to `%USERPROFILE%\.config\opencode\plugins\opencode-yescode-auth`
-- registers plugin by absolute `file:///.../yescode.mjs` entry in `opencode.jsonc/opencode.json`
-- adds `provider.yescode` (OpenAI-compatible -> `http://127.0.0.1:8787/v1`)
-- forwards current OpenCode worktree as request `cwd` (so CLI runs in project folder)
-- checks `auth.json` for existing `yescode` key; if key is missing, runs `opencode auth login --provider yescode`
-- pulls live models from `https://co.yes.vg/api/v1/public/models`
-- enriches each model from `https://models.dev/api.json` when exact match exists
-- writes `provider.yescode.models` metadata and valid reasoning variants per model
+This is a local-dev installer. It updates OpenCode config and registers
+plugin entry from current local build.
 
-Note: ACP tool-call bridge events are disabled in router output; OpenCode receives model-generated content only.
+## 3) Add credentials in OpenCode
+
+Run:
+
+```powershell
+opencode auth login
+```
+
+Then choose provider `CliACP`, and pick one of:
+- `Codex CLI`
+- `Claude CLI`
+- `Gemini CLI`
+
+Each option saves its own key separately.
+
+If a key for some CLI is not set, that CLI can still use its native login session.
+
+## 4) Run
+
+Examples:
+
+```powershell
+opencode run --model cliacp/gpt-5.3-codex "Respond with exactly OK"
+opencode run --model cliacp/claude-sonnet-4-6 "Respond with exactly OK"
+opencode run --model cliacp/gemini-3.1-pro-preview "Respond with exactly OK"
+```
+
+## Optional: API URL configuration
+
+You can set upstream URLs in `C:\Users\<YOU>\.config\opencode\opencode.jsonc`:
+
+```json
+{
+  "provider": {
+    "cliacp": {
+      "options": {
+        "cliAcpCodexBaseURL": "https://your-codex-endpoint",
+        "cliAcpClaudeBaseURL": "https://your-claude-endpoint",
+        "cliAcpGeminiBaseURL": "https://your-gemini-endpoint"
+      }
+    }
+  }
+}
+```
+
+Compatibility options (shared):
+- `cliAcpBaseURL` (shared for Codex + Claude)
+- `cliAcpGeminiBaseURL` (Gemini)
+
+## Notes
+
+- Provider name in UI: `CliACP`.
+- Plugin starts local router automatically.
+- Local router port is selected automatically if default port is busy.
+- `baseURL` for provider is managed by plugin runtime; manual fixed local port config is not required.
 
 ## Uninstall
 
 ```powershell
-dist\opencode\opencode-yescode-auth\uninstall.ps1
+npm run dev:opencode-plugin:unintstall
 ```
-
-It removes plugin files and cleans `provider.yescode` + plugin registration from OpenCode config.

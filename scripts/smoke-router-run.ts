@@ -27,7 +27,7 @@ function hasFlag(args: string[], name: string): boolean {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const provider = readFlag(argv, "--provider") || "yescode";
+  const provider = readFlag(argv, "--provider") || "cliacp";
   const model = readFlag(argv, "--model");
   const message = readFlag(argv, "--message") || "Respond with exactly OK";
   const cwd = readFlag(argv, "--cwd") || process.cwd();
@@ -61,7 +61,7 @@ function summarizeUpdates(updates: any[] | undefined): Record<string, number> {
   return summary;
 }
 
-function readYescodeApiKeyFromAuthFile(): string {
+function readCliAcpApiKeyFromAuthFile(): string {
   const candidates = [
     path.join(os.homedir(), ".local", "share", "opencode", "auth.json"),
     process.env.XDG_DATA_HOME
@@ -73,7 +73,7 @@ function readYescodeApiKeyFromAuthFile(): string {
     try {
       const raw = fs.readFileSync(candidate, "utf8");
       const parsed = JSON.parse(raw) as Record<string, any>;
-      const key = String(parsed?.yescode?.key || "").trim();
+      const key = String(parsed?.cliacp?.key || "").trim();
       if (key) {
         return key;
       }
@@ -85,11 +85,11 @@ function readYescodeApiKeyFromAuthFile(): string {
 }
 
 function resolveApiKey(): string | undefined {
-  const envKey = String(process.env.COYES_API_KEY || "").trim();
+  const envKey = String(process.env.CLI_ACP_API_KEY || "").trim();
   if (envKey) {
     return envKey;
   }
-  const authFileKey = readYescodeApiKeyFromAuthFile();
+  const authFileKey = readCliAcpApiKeyFromAuthFile();
   return authFileKey || undefined;
 }
 

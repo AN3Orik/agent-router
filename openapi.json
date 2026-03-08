@@ -3,7 +3,7 @@
   "info": {
     "title": "Agent Router API",
     "version": "0.1.0",
-    "description": "Unified OpenAPI entrypoint for Codex, Claude, and Gemini CLIs via ACP."
+    "description": "Local API gateway for Codex, Claude, and Gemini CLIs."
   },
   "servers": [
     {
@@ -50,7 +50,7 @@
     "/v1/models": {
       "get": {
         "summary": "OpenAI-compatible models list",
-        "description": "Dynamic yescode catalog merged from Codex/Claude/Gemini model sets.",
+        "description": "Models currently available through CliACP (Codex, Claude, Gemini backends).",
         "operationId": "listModels",
         "responses": {
           "200": {
@@ -144,7 +144,7 @@
     },
     "/v1/agents/chat": {
       "post": {
-        "summary": "Run one ACP prompt",
+        "summary": "Run one prompt",
         "operationId": "chat",
         "requestBody": {
           "required": true,
@@ -192,9 +192,9 @@
     },
     "/v1/agents/chat/stream": {
       "post": {
-        "summary": "Run one ACP prompt with SSE streaming",
+        "summary": "Run one prompt with SSE streaming",
         "operationId": "chatStream",
-        "description": "Streams real-time ACP updates and token chunks as Server-Sent Events.",
+        "description": "Streams progress, token chunks, and final result via Server-Sent Events.",
         "requestBody": {
           "required": true,
           "content": {
@@ -231,11 +231,11 @@
     },
     "/v1/runtime": {
       "get": {
-        "summary": "Router runtime stats",
+        "summary": "Runtime stats",
         "operationId": "runtimeStats",
         "responses": {
           "200": {
-            "description": "Current ACP pool runtime state",
+            "description": "Current runtime and worker-pool state",
             "content": {
               "application/json": {
                 "schema": {
@@ -260,22 +260,23 @@
           "provider": {
             "type": "string",
             "enum": [
-              "yescode",
+              "cliacp",
               "codex",
               "claude",
               "gemini"
-            ]
+            ],
+            "description": "Execution backend. Use cliacp for automatic routing by model id."
           },
           "message": {
             "type": "string"
           },
           "model": {
             "type": "string",
-            "description": "Provider model id (for example: gpt-5-codex, sonnet, gemini-2.5-flash)."
+            "description": "Model id (for example: gpt-5.3-codex, claude-sonnet-4-6, gemini-3.1-pro-preview)."
           },
           "cwd": {
             "type": "string",
-            "description": "Absolute or relative working directory for ACP session."
+            "description": "Working directory used by the selected CLI."
           },
           "timeoutMs": {
             "type": "integer",
@@ -301,7 +302,7 @@
               "xhigh",
               "max"
             ],
-            "description": "Reasoning level forwarded to Codex CLI as model_reasoning_effort."
+            "description": "Reasoning effort level. Supported values depend on provider/model."
           },
           "includeEvents": {
             "type": "boolean",
@@ -309,7 +310,15 @@
           },
           "apiKey": {
             "type": "string",
-            "description": "co.yes.vg API key. Optional when COYES_API_KEY or X-API-Key header is set."
+            "description": "Optional provider API key. When omitted, router uses native CLI auth sessions."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Codex/Claude requests."
+          },
+          "geminiBaseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Gemini requests."
           },
           "sessionMode": {
             "type": "string",
@@ -318,20 +327,16 @@
               "sticky"
             ],
             "default": "stateless",
-            "description": "stateless: new ACP session for each request; sticky: reuse ACP session across requests."
+            "description": "stateless = new conversation each request; sticky = reuse conversation across requests."
           },
           "routerSessionId": {
             "type": "string",
-            "description": "Sticky router session id returned by previous response."
-          },
-          "stickySessionId": {
-            "type": "string",
-            "description": "Alias for routerSessionId."
+            "description": "Session id returned by a previous sticky response."
           },
           "releaseSession": {
             "type": "boolean",
             "default": false,
-            "description": "When true with sessionMode=sticky, closes sticky session after response."
+            "description": "When true with sticky mode, closes the sticky session after this request."
           }
         }
       },
@@ -470,7 +475,7 @@
           "provider": {
             "type": "string",
             "enum": [
-              "yescode",
+              "cliacp",
               "codex",
               "claude",
               "gemini"
@@ -518,7 +523,16 @@
             "additionalProperties": true
           },
           "apiKey": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional provider API key. When omitted, router uses native CLI auth sessions."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Codex/Claude requests."
+          },
+          "geminiBaseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Gemini requests."
           },
           "sessionMode": {
             "type": "string",
@@ -528,18 +542,16 @@
             ]
           },
           "routerSessionId": {
-            "type": "string"
+            "type": "string",
+            "description": "Session id returned by a previous sticky response."
           },
           "releaseSession": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When true with sticky mode, closes the sticky session after this request."
           },
           "promptCacheKey": {
             "type": "string",
-            "description": "External session key. When present router auto-bridges to sticky ACP session."
-          },
-          "prompt_cache_key": {
-            "type": "string",
-            "description": "snake_case alias for promptCacheKey."
+            "description": "External session key used to auto-map requests to a sticky router session."
           }
         }
       },
@@ -577,16 +589,18 @@
         "type": "object",
         "properties": {
           "model": {
-            "type": "string"
+            "type": "string",
+            "description": "Model id from /v1/models."
           },
           "provider": {
             "type": "string",
             "enum": [
-              "yescode",
+              "cliacp",
               "codex",
               "claude",
               "gemini"
-            ]
+            ],
+            "description": "Execution backend. Use cliacp for automatic routing by model id."
           },
           "input": {
             "description": "String or structured input payload.",
@@ -624,7 +638,16 @@
             "additionalProperties": true
           },
           "apiKey": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional provider API key. When omitted, router uses native CLI auth sessions."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Codex/Claude requests."
+          },
+          "geminiBaseUrl": {
+            "type": "string",
+            "description": "Optional upstream API base URL override for Gemini requests."
           },
           "sessionMode": {
             "type": "string",
@@ -634,18 +657,16 @@
             ]
           },
           "routerSessionId": {
-            "type": "string"
+            "type": "string",
+            "description": "Session id returned by a previous sticky response."
           },
           "releaseSession": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When true with sticky mode, closes the sticky session after this request."
           },
           "promptCacheKey": {
             "type": "string",
-            "description": "External session key. When present router auto-bridges to sticky ACP session."
-          },
-          "prompt_cache_key": {
-            "type": "string",
-            "description": "snake_case alias for promptCacheKey."
+            "description": "External session key used to auto-map requests to a sticky router session."
           }
         }
       },

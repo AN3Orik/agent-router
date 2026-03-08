@@ -17,7 +17,7 @@
   "include": [
     "src/**/*.ts",
     "scripts/**/*.ts",
-    "opencode/opencode-yescode-auth/**/*.ts"
+    "opencode/opencode-cli-acp/**/*.ts"
   ],
   "exclude": [
     "dist",

@@ -68,13 +68,17 @@ async function fetchJson(url: string, headers: Record<string, string>): Promise<
   }
 }
 
-async function fetchPublicModels(apiKey: string): Promise<CatalogModel[]> {
+async function fetchPublicModels(apiKey?: string): Promise<CatalogModel[]> {
+  const headers: Record<string, string> = {};
+  const normalizedApiKey = String(apiKey || "").trim();
+  if (normalizedApiKey) {
+    headers.Authorization = `Bearer ${normalizedApiKey}`;
+    headers["x-api-key"] = normalizedApiKey;
+  }
+
   const payload = await fetchJson(
-    `${trimSlash(APP_CONFIG.coYesBaseUrl)}/api/v1/public/models`,
-    {
-      Authorization: `Bearer ${apiKey}`,
-      "x-api-key": apiKey
-    }
+    `${trimSlash(APP_CONFIG.baseUrl)}/api/v1/public/models`,
+    headers
   );
 
   const data = Array.isArray(payload?.models) ? payload.models : [];
@@ -99,18 +103,16 @@ function dedupeModels(models: CatalogModel[]): Map<string, CatalogModel> {
   return byId;
 }
 
-export async function getModelCatalog(apiKey: string, forceRefresh = false): Promise<{
+export async function getModelCatalog(apiKey?: string, forceRefresh = false): Promise<{
   models: CatalogModel[];
   byId: Map<string, CatalogModel>;
 }> {
-  if (!apiKey) {
-    throw new Error("API key is required to list models.");
-  }
+  const normalizedApiKey = String(apiKey || "").trim();
 
   const now = Date.now();
   if (
     !forceRefresh &&
-    cache.key === apiKey &&
+    cache.key === normalizedApiKey &&
     cache.models.length > 0 &&
     cache.expiresAt > now
   ) {
@@ -120,11 +122,11 @@ export async function getModelCatalog(apiKey: string, forceRefresh = false): Pro
     };
   }
 
-  const publicRes = await fetchPublicModels(apiKey);
+  const publicRes = await fetchPublicModels(normalizedApiKey);
   const collected = Array.isArray(publicRes) ? publicRes : [];
 
   if (collected.length === 0) {
-    throw new Error("Failed to load model catalog from co.yes.vg.");
+    throw new Error("Failed to load model catalog from configured BASE_URL.");
   }
 
   const models = [...dedupeModels(collected).values()].sort((a, b) =>
@@ -132,7 +134,7 @@ export async function getModelCatalog(apiKey: string, forceRefresh = false): Pro
   );
   const byId = dedupeModels(models);
   cache = {
-    key: apiKey,
+    key: normalizedApiKey,
     expiresAt: now + CACHE_TTL_MS,
     models,
     byId
@@ -152,10 +154,10 @@ export async function resolveProviderAndModel({
   provider?: string;
   model?: string;
   apiKey?: string;
-}): Promise<{ provider: "yescode" | "codex" | "claude" | "gemini"; model?: string }> {
+}): Promise<{ provider: "cliacp" | "codex" | "claude" | "gemini"; model?: string }> {
   const providerRaw = String(provider || "").trim().toLowerCase();
   const requestedModel = String(model || "").trim();
-  if (providerRaw && providerRaw !== "yescode") {
+  if (providerRaw && providerRaw !== "cliacp") {
     return {
       provider: providerRaw as "codex" | "claude" | "gemini",
       model: requestedModel || undefined
@@ -169,30 +171,27 @@ export async function resolveProviderAndModel({
     };
   }
 
-  if (!apiKey) {
-    return {
-      provider: inferProviderFromModel(requestedModel),
-      model: requestedModel
-    };
-  }
-
-  const { byId } = await getModelCatalog(apiKey);
-  const exact = byId.get(requestedModel);
-  if (exact) {
-    return {
-      provider: exact.provider,
-      model: exact.id
-    };
-  }
-
-  const lower = requestedModel.toLowerCase();
-  for (const [id, entry] of byId.entries()) {
-    if (id.toLowerCase() === lower) {
+  try {
+    const { byId } = await getModelCatalog(apiKey);
+    const exact = byId.get(requestedModel);
+    if (exact) {
       return {
-        provider: entry.provider,
-        model: entry.id
+        provider: exact.provider,
+        model: exact.id
       };
     }
+
+    const lower = requestedModel.toLowerCase();
+    for (const [id, entry] of byId.entries()) {
+      if (id.toLowerCase() === lower) {
+        return {
+          provider: entry.provider,
+          model: entry.id
+        };
+      }
+    }
+  } catch {
+    // Fall back to provider inference when catalog lookup is unavailable.
   }
 
   return {
