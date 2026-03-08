@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -16,6 +17,10 @@ const NATIVE_AUTH_SENTINEL = "__CLI_ACP_NATIVE_AUTH__";
 const CODEX_AUTH_PROVIDER_ID = "cliacp-codex";
 const CLAUDE_AUTH_PROVIDER_ID = "cliacp-claude";
 const GEMINI_AUTH_PROVIDER_ID = "cliacp-gemini";
+const CLIACP_ACP_SSE_COMMENT_PREFIX = "cliacp_acp_update";
+const CLIACP_BRIDGE_STATE_KEY = "__cliacp_tool_bridge_state__";
+const CLIACP_BRIDGE_META_SOURCE = "cliacp-acp-bridge";
+const CLIACP_GENERIC_TOOL_NAME = "acp_tool";
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function trimRightSlash(value) {
@@ -42,6 +47,170 @@ function getRouterState() {
     };
   }
   return globalThis[ROUTER_STATE_KEY];
+}
+
+/**
+ * Returns per-process bridge state used to map ACP tool events to OpenCode parts.
+ */
+function getBridgeState() {
+  if (!globalThis[CLIACP_BRIDGE_STATE_KEY]) {
+    globalThis[CLIACP_BRIDGE_STATE_KEY] = {
+      assistantBySession: new Map(),
+      toolPartByCall: new Map(),
+      pendingBySession: new Map(),
+      queueBySession: new Map()
+    };
+  }
+  return globalThis[CLIACP_BRIDGE_STATE_KEY];
+}
+
+/**
+ * Builds a stable composite key for a tool call within a specific session.
+ */
+function bridgeCallKey(sessionID, callId) {
+  return `${sessionID}::${callId}`;
+}
+
+/**
+ * Generates a deterministic part id so repeated updates target the same tool card.
+ */
+function buildStableBridgePartId(sessionID, callId) {
+  const digest = crypto
+    .createHash("sha1")
+    .update(bridgeCallKey(sessionID, callId))
+    .digest("hex")
+    .slice(0, 24);
+  return `part_${digest}`;
+}
+
+/**
+ * Parses bridge input summary into an object accepted by ToolPart.state.input.
+ */
+function parseBridgeToolInput(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Preserve raw text if summary is not JSON.
+  }
+  return {
+    raw: value
+  };
+}
+
+/**
+ * Whether a terminal tool status should be rendered as an error tool part.
+ */
+function isBridgeResultStatusError(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  return new Set([
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "aborted",
+    "timeout"
+  ]).has(normalized);
+}
+
+/**
+ * Whether a tool status indicates completion and allows finalizing the tool part.
+ */
+function isTerminalBridgeStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  return new Set([
+    "completed",
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "aborted",
+    "timeout"
+  ]).has(normalized);
+}
+
+/**
+ * Extracts prompt cache key / session id from request body metadata.
+ */
+function extractPromptCacheKey(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "";
+  }
+  const metadata =
+    payload.metadata && typeof payload.metadata === "object"
+      ? payload.metadata
+      : {};
+  const candidates = [
+    payload.promptCacheKey,
+    payload.prompt_cache_key,
+    metadata.promptCacheKey,
+    metadata.prompt_cache_key
+  ];
+  for (const candidate of candidates) {
+    const value = trimOptional(candidate);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+/**
+ * Decodes bridge payload from an SSE comment line emitted by the router.
+ */
+function decodeBridgeCommentLine(line) {
+  if (typeof line !== "string" || !line.startsWith(":")) {
+    return null;
+  }
+  const content = line.slice(1).trim();
+  const prefix = `${CLIACP_ACP_SSE_COMMENT_PREFIX} `;
+  if (!content.startsWith(prefix)) {
+    return null;
+  }
+  const encoded = content.slice(prefix.length).trim();
+  if (!encoded) {
+    return null;
+  }
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    const payload = JSON.parse(decoded);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    if (!trimOptional(payload.type) || !trimOptional(payload.callId)) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Serializes bridge updates per session to avoid out-of-order part transitions.
+ */
+function enqueueBridgeSessionJob(sessionID, task) {
+  const state = getBridgeState();
+  const previous = state.queueBySession.get(sessionID) || Promise.resolve();
+  const next = previous
+    .then(task)
+    .catch(() => {
+      // Avoid breaking the queue chain.
+    })
+    .finally(() => {
+      if (state.queueBySession.get(sessionID) === next) {
+        state.queueBySession.delete(sessionID);
+      }
+    });
+  state.queueBySession.set(sessionID, next);
+  return next;
 }
 
 async function checkHealth(routerRoot) {
@@ -434,10 +603,24 @@ async function fetchRouterModelIds(baseURL): Promise<string[]> {
 }
 
 function parseJsonBody(init) {
-  if (!init || typeof init !== "object" || typeof init.body !== "string") {
+  if (!init || typeof init !== "object") {
     return null;
   }
-  const raw = init.body.trim();
+  const rawBody = init.body;
+  if (rawBody === undefined || rawBody === null) {
+    return null;
+  }
+  let raw = "";
+  if (typeof rawBody === "string") {
+    raw = rawBody;
+  } else if (rawBody instanceof Uint8Array) {
+    raw = Buffer.from(rawBody).toString("utf8");
+  } else if (rawBody instanceof ArrayBuffer) {
+    raw = Buffer.from(rawBody).toString("utf8");
+  } else {
+    return null;
+  }
+  raw = raw.trim();
   if (!raw) {
     return null;
   }
@@ -450,6 +633,307 @@ function parseJsonBody(init) {
     // Ignore malformed payloads.
   }
   return null;
+}
+
+/**
+ * True when the request is OpenAI Responses streaming call that can carry bridge comments.
+ */
+function isResponsesStreamRequest(requestUrl, body) {
+  if (!requestUrl) {
+    return false;
+  }
+  try {
+    const parsed = new URL(requestUrl);
+    if (!parsed.pathname.endsWith("/v1/responses")) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return body?.stream === true;
+}
+
+/**
+ * Persists tool part changes into OpenCode using whichever client surface is available.
+ */
+async function updateBridgeToolPart({
+  client,
+  serverUrl,
+  directory,
+  sessionID,
+  messageID,
+  part
+}) {
+  if (client?.part?.update) {
+    const result = await client.part.update({
+      sessionID,
+      messageID,
+      partID: part.id,
+      directory,
+      part
+    });
+    if (result?.error) {
+      const message =
+        result.error && typeof result.error === "object" && "message" in result.error
+          ? String(result.error.message || "Failed to update bridge tool part.")
+          : "Failed to update bridge tool part.";
+      throw new Error(message);
+    }
+    return;
+  }
+
+  if (client?._client?.patch) {
+    const result = await client._client.patch({
+      url: "/session/{sessionID}/message/{messageID}/part/{partID}",
+      path: {
+        sessionID,
+        messageID,
+        partID: part.id
+      },
+      query: directory ? { directory } : undefined,
+      body: part,
+      headers: {
+        "content-type": "application/json"
+      }
+    });
+    if (result?.error) {
+      const message =
+        result.error && typeof result.error === "object" && "message" in result.error
+          ? String(result.error.message || "Failed to update bridge tool part.")
+          : "Failed to update bridge tool part.";
+      throw new Error(message);
+    }
+    return;
+  }
+
+  const base = trimOptional(serverUrl);
+  throw new Error(
+    base
+      ? `Cannot update bridge tool part: unsupported client shape for server ${base}.`
+      : "Cannot update bridge tool part: unsupported client shape."
+  );
+}
+
+/**
+ * Applies decoded bridge payload to message tool parts for a specific session.
+ */
+async function applyBridgePayloadForSession({
+  client,
+  serverUrl,
+  directory,
+  sessionID,
+  payload
+}) {
+  const state = getBridgeState();
+  const message = state.assistantBySession.get(sessionID);
+  const messageID = trimOptional(message?.messageID);
+  if (!messageID) {
+    const queue = state.pendingBySession.get(sessionID) || [];
+    queue.push(payload);
+    state.pendingBySession.set(sessionID, queue);
+    return;
+  }
+
+  const callId = trimOptional(payload.callId);
+  if (!callId) {
+    return;
+  }
+  const key = bridgeCallKey(sessionID, callId);
+  const now = Date.now();
+  const stored = state.toolPartByCall.get(key);
+  const input = stored?.input || parseBridgeToolInput(payload.inputSummary);
+  const payloadToolName = trimOptional(payload.toolName);
+  const toolName =
+    payloadToolName && payloadToolName !== CLIACP_GENERIC_TOOL_NAME
+      ? payloadToolName
+      : stored?.toolName || CLIACP_GENERIC_TOOL_NAME;
+  const title = trimOptional(payload.title) || stored?.title || toolName;
+  const startTime =
+    typeof stored?.startTime === "number" && stored.startTime > 0
+      ? stored.startTime
+      : now;
+  const partID = stored?.partID || buildStableBridgePartId(sessionID, callId);
+  const metadata = {
+    source: CLIACP_BRIDGE_META_SOURCE,
+    cliacpBridge: true,
+    callId
+  };
+
+  if (payload.type === "tool_call") {
+    const part = {
+      id: partID,
+      sessionID,
+      messageID,
+      type: "tool",
+      callID: callId,
+      tool: toolName,
+      state: {
+        status: "running",
+        input,
+        title,
+        metadata: {
+          ...metadata,
+          status: trimOptional(payload.status) || "running"
+        },
+        time: {
+          start: startTime
+        }
+      },
+      metadata
+    };
+    await updateBridgeToolPart({
+      client,
+      serverUrl,
+      directory,
+      sessionID,
+      messageID,
+      part
+    });
+    state.toolPartByCall.set(key, {
+      partID,
+      sessionID,
+      messageID,
+      toolName,
+      title,
+      input,
+      startTime
+    });
+    return;
+  }
+
+  if (payload.type !== "tool_result" || !isTerminalBridgeStatus(payload.status)) {
+    return;
+  }
+
+  const resultStatus = trimOptional(payload.status).toLowerCase() || "completed";
+  const outputText = String(payload.outputText || "");
+  if (isBridgeResultStatusError(resultStatus)) {
+    const part = {
+      id: partID,
+      sessionID,
+      messageID,
+      type: "tool",
+      callID: callId,
+      tool: toolName,
+      state: {
+        status: "error",
+        input,
+        error: outputText || `Tool finished with status "${resultStatus}".`,
+        metadata: {
+          ...metadata,
+          status: resultStatus
+        },
+        time: {
+          start: startTime,
+          end: now
+        }
+      },
+      metadata
+    };
+    await updateBridgeToolPart({
+      client,
+      serverUrl,
+      directory,
+      sessionID,
+      messageID,
+      part
+    });
+    state.toolPartByCall.delete(key);
+    return;
+  }
+
+  const part = {
+    id: partID,
+    sessionID,
+    messageID,
+    type: "tool",
+    callID: callId,
+    tool: toolName,
+    state: {
+      status: "completed",
+      input,
+      output: outputText,
+      title,
+      metadata: {
+        ...metadata,
+        status: resultStatus
+      },
+      time: {
+        start: startTime,
+        end: now
+      }
+    },
+    metadata
+  };
+  await updateBridgeToolPart({
+    client,
+    serverUrl,
+    directory,
+    sessionID,
+    messageID,
+    part
+  });
+  state.toolPartByCall.delete(key);
+}
+
+/**
+ * Observes cloned Responses stream and dispatches bridge comment payloads to the queue.
+ */
+function observeBridgeStream({
+  response,
+  sessionID,
+  client,
+  serverUrl,
+  directory
+}) {
+  if (!response?.body) {
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const processLine = (line) => {
+    const payload = decodeBridgeCommentLine(line);
+    if (!payload) {
+      return;
+    }
+    enqueueBridgeSessionJob(sessionID, async () => {
+      await applyBridgePayloadForSession({
+        client,
+        serverUrl,
+        directory,
+        sessionID,
+        payload
+      });
+    });
+  };
+
+  const pump = async () => {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, "");
+        buffer = buffer.slice(newlineIndex + 1);
+        processLine(line);
+        newlineIndex = buffer.indexOf("\n");
+      }
+    }
+
+    const tail = buffer.trim();
+    if (tail) {
+      processLine(tail.replace(/\r$/, ""));
+    }
+  };
+
+  void pump().catch(() => {
+    // Ignore observer failures; they must not break model responses.
+  });
 }
 
 function resolveAuthPath() {
@@ -690,9 +1174,111 @@ export async function CliAcpAuthPlugin() {
     (typeof pluginInput.worktree === "string" && pluginInput.worktree.trim()) ||
     (typeof pluginInput.directory === "string" && pluginInput.directory.trim()) ||
     "";
+  const bridgeClient = pluginInput.client;
+  const bridgeServerUrl =
+    pluginInput.serverUrl && typeof pluginInput.serverUrl.toString === "function"
+      ? pluginInput.serverUrl.toString()
+      : "";
+  const bridgeDirectory =
+    (typeof pluginInput.directory === "string" && pluginInput.directory.trim()) ||
+    pluginWorkdir;
   let configuredMcpServers = [];
+  const flushPendingBridgePayloads = (sessionID) =>
+    enqueueBridgeSessionJob(sessionID, async () => {
+      const state = getBridgeState();
+      const pending = state.pendingBySession.get(sessionID) || [];
+      if (pending.length === 0) {
+        return;
+      }
+      state.pendingBySession.delete(sessionID);
+      for (const payload of pending) {
+        await applyBridgePayloadForSession({
+          client: bridgeClient,
+          serverUrl: bridgeServerUrl,
+          directory: bridgeDirectory,
+          sessionID,
+          payload
+        });
+      }
+    });
+
+  const rememberAssistantMessage = (sessionID, messageID) => {
+    if (!sessionID || !messageID) {
+      return;
+    }
+    const state = getBridgeState();
+    state.assistantBySession.set(sessionID, {
+      sessionID,
+      messageID,
+      updatedAt: Date.now()
+    });
+    void flushPendingBridgePayloads(sessionID);
+  };
 
   return {
+    event: async ({ event }) => {
+      const evt = event && typeof event === "object" ? event : null;
+      if (!evt) {
+        return;
+      }
+
+      if (evt.type === "message.updated") {
+        const info = evt.properties?.info;
+        if (info?.role === "assistant") {
+          const sessionID = trimOptional(info.sessionID);
+          const messageID = trimOptional(info.id);
+          if (sessionID && messageID) {
+            rememberAssistantMessage(sessionID, messageID);
+          }
+        }
+        return;
+      }
+
+      if (evt.type === "message.removed") {
+        const sessionID = trimOptional(evt.properties?.sessionID);
+        const messageID = trimOptional(evt.properties?.messageID);
+        if (!sessionID || !messageID) {
+          return;
+        }
+        const state = getBridgeState();
+        const current = state.assistantBySession.get(sessionID);
+        if (current?.messageID === messageID) {
+          state.assistantBySession.delete(sessionID);
+        }
+      }
+    },
+    "experimental.chat.messages.transform": async (_input, output) => {
+      if (!output || !Array.isArray(output.messages)) {
+        return;
+      }
+      for (const message of output.messages) {
+        if (!message || !Array.isArray(message.parts)) {
+          continue;
+        }
+        message.parts = message.parts.filter((part) => {
+          if (!part || part.type !== "tool") {
+            return true;
+          }
+          const partMeta =
+            part.metadata && typeof part.metadata === "object"
+              ? part.metadata
+              : {};
+          const stateMeta =
+            part.state &&
+            part.state.metadata &&
+            typeof part.state.metadata === "object"
+              ? part.state.metadata
+              : {};
+          const source = trimOptional(partMeta.source || stateMeta.source);
+          const bridgeFlag =
+            partMeta.cliacpBridge === true || stateMeta.cliacpBridge === true;
+          if (bridgeFlag) {
+            return false;
+          }
+          return source !== CLIACP_BRIDGE_META_SOURCE;
+        });
+      }
+    },
     config: async (config) => {
       const currentConfig = ensureObject(config);
       const providerMap = ensureObject(currentConfig.provider);
@@ -860,6 +1446,7 @@ export async function CliAcpAuthPlugin() {
             let patchedInit = init || {};
             let requestApiKey = globalApiKey;
             const url = getRequestUrl(input);
+            let requestBody = parseJsonBody(patchedInit);
             const isWriteRequest = (() => {
               if (!url) {
                 return false;
@@ -872,16 +1459,16 @@ export async function CliAcpAuthPlugin() {
               }
             })();
             if (isWriteRequest) {
-              const body = parseJsonBody(patchedInit);
-              if (body) {
+              if (requestBody) {
                 const patched = patchRequestBodyForCliAcp({
-                  body,
+                  body: requestBody,
                   options,
                   authKeys,
                   mcpServers: configuredMcpServers
                 });
                 if (patched) {
                   requestApiKey = patched.apiKey || requestApiKey;
+                  requestBody = patched.body;
                   patchedInit = {
                     ...patchedInit,
                     body: JSON.stringify(patched.body)
@@ -900,10 +1487,23 @@ export async function CliAcpAuthPlugin() {
             if (pluginWorkdir && !requestHeaders.has("x-cliacp-cwd")) {
               requestHeaders.set("x-cliacp-cwd", pluginWorkdir);
             }
-            return upstreamFetch(input, {
+            const response = await upstreamFetch(input, {
               ...patchedInit,
               headers: requestHeaders
             });
+            if (isWriteRequest && isResponsesStreamRequest(url, requestBody)) {
+              const sessionID = extractPromptCacheKey(requestBody);
+              if (sessionID && response?.body) {
+                observeBridgeStream({
+                  response: response.clone(),
+                  sessionID,
+                  client: bridgeClient,
+                  serverUrl: bridgeServerUrl,
+                  directory: bridgeDirectory
+                });
+              }
+            }
+            return response;
           }
         };
       }

@@ -20,6 +20,8 @@ const OPENAI_SESSION_BRIDGE_TTL_MS = Number(
 const OPENAI_SESSION_BRIDGE_MAX = Number(
   process.env.OPENAI_SESSION_BRIDGE_MAX || 10_000
 );
+const CLIACP_ACP_SSE_COMMENT_PREFIX = "cliacp_acp_update";
+const CLIACP_GENERIC_TOOL_NAME = "acp_tool";
 const OPENAI_SESSION_BRIDGE = new Map();
 
 function sendJson(res, statusCode, body) {
@@ -102,6 +104,16 @@ function writeSseData(res, data) {
   if (!res.writableEnded) {
     res.write(`data: ${data}\n\n`);
   }
+}
+
+/**
+ * Writes an SSE comment line used as side-channel metadata for plugin bridge events.
+ */
+function writeSseComment(res, comment) {
+  if (res.writableEnded) {
+    return;
+  }
+  res.write(`: ${String(comment || "")}\n\n`);
 }
 
 function textBlock(text) {
@@ -315,6 +327,51 @@ function extractImageLikeValue(part) {
   return "";
 }
 
+/**
+ * Normalizes OpenAI Responses item type for routing/filter checks.
+ */
+function normalizeItemType(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+/**
+ * Detects tool-related artifacts that must not be echoed back into provider prompts.
+ */
+function isToolArtifactType(type) {
+  const normalized = normalizeItemType(type);
+  if (!normalized) {
+    return false;
+  }
+  if (
+    normalized === "item_reference" ||
+    normalized === "reasoning" ||
+    normalized === "function_call" ||
+    normalized === "function_call_output" ||
+    normalized === "mcp_approval_request" ||
+    normalized === "mcp_approval_response"
+  ) {
+    return true;
+  }
+  return (
+    normalized.endsWith("_call") ||
+    normalized.endsWith("_call_output") ||
+    normalized.endsWith("_tool_call") ||
+    normalized.endsWith("_tool_result") ||
+    normalized.endsWith("_search_call")
+  );
+}
+
+/**
+ * Guard that filters provider/tool artifacts from incoming chat history.
+ */
+function shouldSkipPromptEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+  // Never send provider-executed tool artifacts back to CLI prompts.
+  return isToolArtifactType(entry.type);
+}
+
 function contentBlocksFromParts(parts, role = "user") {
   const blocks = [];
   const roleText = textBlock(`[${role}]`);
@@ -331,6 +388,9 @@ function contentBlocksFromParts(parts, role = "user") {
       continue;
     }
     if (!part || typeof part !== "object") {
+      continue;
+    }
+    if (shouldSkipPromptEntry(part)) {
       continue;
     }
 
@@ -409,7 +469,17 @@ function buildPromptBlocksFromMessages(messages) {
 
   const blocks = [];
   for (const message of messages) {
-    const role = typeof message?.role === "string" ? message.role : "user";
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    if (shouldSkipPromptEntry(message)) {
+      continue;
+    }
+
+    const role = typeof message.role === "string" ? message.role : "";
+    if (!role) {
+      continue;
+    }
     const content = message?.content;
 
     if (typeof content === "string") {
@@ -460,6 +530,9 @@ function buildPromptBlocksFromInput(input) {
       continue;
     }
     if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    if (shouldSkipPromptEntry(entry)) {
       continue;
     }
 
@@ -529,6 +602,308 @@ function extractReasoningTextFromUpdates(updates) {
     }
   }
   return reasoning.trim();
+}
+
+function safeJsonStringify(value, fallback = "") {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return fallback;
+  }
+}
+
+function isTerminalToolStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return [
+    "completed",
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "aborted",
+    "timeout"
+  ].includes(normalized);
+}
+
+function extractToolContentText(content) {
+  if (!Array.isArray(content) || content.length === 0) {
+    return "";
+  }
+  const chunks = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    if (typeof item.text === "string" && item.text.trim()) {
+      chunks.push(item.text.trim());
+      continue;
+    }
+    const nested = item.content;
+    if (nested && typeof nested === "object") {
+      if (typeof nested.text === "string" && nested.text.trim()) {
+        chunks.push(nested.text.trim());
+        continue;
+      }
+      if (typeof nested.content === "string" && nested.content.trim()) {
+        chunks.push(nested.content.trim());
+      }
+    }
+  }
+  return chunks.join("\n\n").trim();
+}
+
+function normalizeCommand(rawCommand) {
+  if (!Array.isArray(rawCommand)) {
+    return [];
+  }
+  return rawCommand
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function parseMcpToolNameFromTitle(rawTitle) {
+  const title = String(rawTitle || "").trim();
+  if (!title) {
+    return "";
+  }
+  const mcpPrefix = "mcp__";
+  if (!title.startsWith(mcpPrefix)) {
+    return "";
+  }
+  const rest = title.slice(mcpPrefix.length);
+  const separator = "__";
+  const splitIndex = rest.indexOf(separator);
+  if (splitIndex < 1) {
+    return "";
+  }
+  const server = rest.slice(0, splitIndex).trim();
+  const tool = rest.slice(splitIndex + separator.length).trim();
+  if (!server || !tool) {
+    return "";
+  }
+  return `${server}/${tool}`;
+}
+
+function parseToolNameFromCallId(rawCallId) {
+  const callId = String(rawCallId || "").trim();
+  if (!callId) {
+    return "";
+  }
+  const match = /^(.+)-(\d{6,})$/.exec(callId);
+  if (!match) {
+    return "";
+  }
+  return String(match[1] || "").trim();
+}
+
+function extractToolArguments(rawInput) {
+  if (!rawInput || typeof rawInput !== "object") {
+    return undefined;
+  }
+  if (rawInput.arguments !== undefined) {
+    return rawInput.arguments;
+  }
+  const knownKeys = new Set([
+    "server",
+    "tool",
+    "call_id",
+    "callId",
+    "command",
+    "cwd",
+    "kind",
+    "source",
+    "status",
+    "title"
+  ]);
+  const entries = Object.entries(rawInput).filter(
+    ([key, value]) => !knownKeys.has(key) && value !== undefined
+  );
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Builds a normalized bridge envelope for ACP tool call/update events.
+ */
+function toToolCallEnvelope(update) {
+  const rawInput =
+    update?.rawInput && typeof update.rawInput === "object"
+      ? update.rawInput
+      : {};
+  const callId = String(
+    update?.toolCallId || rawInput.call_id || rawInput.callId || ""
+  ).trim();
+  if (!callId) {
+    return null;
+  }
+
+  const server = String(rawInput.server || "").trim();
+  const tool = String(rawInput.tool || "").trim();
+  const title = String(update?.title || "").trim();
+  const command = normalizeCommand(rawInput.command);
+  const cwd = String(rawInput.cwd || "").trim();
+  const kind = String(update?.kind || rawInput.kind || "").trim();
+  const source = String(rawInput.source || "").trim();
+  const status = String(update?.status || "").trim().toLowerCase();
+  const mcpToolNameFromTitle = parseMcpToolNameFromTitle(title);
+  const toolNameFromCallId = parseToolNameFromCallId(callId);
+
+  const toolName = (() => {
+    if (server && tool) {
+      return `${server}/${tool}`;
+    }
+    if (tool) {
+      return tool;
+    }
+    if (mcpToolNameFromTitle) {
+      return mcpToolNameFromTitle;
+    }
+    if (command.length > 0) {
+      return command[0];
+    }
+    if (toolNameFromCallId) {
+      return toolNameFromCallId;
+    }
+    if (title) {
+      return title;
+    }
+    return "acp_tool";
+  })();
+  const toolArguments = extractToolArguments(rawInput);
+
+  const summary = {
+    title: title || undefined,
+    source: source || undefined,
+    kind: kind || undefined,
+    status: status || undefined,
+    ...(server ? { server } : {}),
+    ...(tool ? { tool } : {}),
+    ...(toolArguments !== undefined ? { arguments: toolArguments } : {}),
+    ...(command.length > 0 ? { command } : {}),
+    ...(cwd ? { cwd } : {})
+  };
+
+  return {
+    callId,
+    toolName,
+    title,
+    status,
+    inputSummary: safeJsonStringify(summary, "")
+  };
+}
+
+/**
+ * Extracts best-effort human-readable tool result text from ACP update payload.
+ */
+function toToolResultText(update) {
+  const contentText = extractToolContentText(update?.content);
+  if (contentText) {
+    return contentText;
+  }
+
+  const rawOutput =
+    update?.rawOutput && typeof update.rawOutput === "object"
+      ? update.rawOutput
+      : {};
+  const preferred = [
+    rawOutput.formatted_output,
+    rawOutput.aggregated_output,
+    rawOutput.stdout,
+    rawOutput.stderr,
+    rawOutput.output
+  ];
+  for (const item of preferred) {
+    if (typeof item === "string" && item.trim()) {
+      return item.trim();
+    }
+  }
+
+  const serialized = safeJsonStringify(rawOutput, "");
+  if (serialized) {
+    return serialized;
+  }
+
+  return "";
+}
+
+/**
+ * Encodes a bridge payload as base64 JSON and emits it in SSE comment channel.
+ */
+function writeCliAcpToolUpdateComment(res, payload) {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+  const encoded = Buffer.from(
+    JSON.stringify(payload),
+    "utf8"
+  ).toString("base64");
+  writeSseComment(res, `${CLIACP_ACP_SSE_COMMENT_PREFIX} ${encoded}`);
+}
+
+/**
+ * Converts ACP tool lifecycle updates into bridge comment events for the plugin.
+ */
+function emitCliAcpToolUpdateFromAcp(res, update) {
+  if (!update || typeof update !== "object") {
+    return;
+  }
+
+  const updateType = String(update?.sessionUpdate || "");
+  if (updateType === "tool_call") {
+    const envelope = toToolCallEnvelope(update);
+    if (!envelope) {
+      return;
+    }
+    writeCliAcpToolUpdateComment(res, {
+      type: "tool_call",
+      callId: envelope.callId,
+      toolName: envelope.toolName,
+      title: envelope.title,
+      status: envelope.status || "pending",
+      inputSummary: envelope.inputSummary
+    });
+    return;
+  }
+
+  if (updateType !== "tool_call_update") {
+    return;
+  }
+
+  if (!isTerminalToolStatus(update?.status)) {
+    return;
+  }
+
+  const envelope = toToolCallEnvelope(update);
+  const callId = envelope?.callId || String(update?.toolCallId || "").trim();
+  if (!callId) {
+    return;
+  }
+  const toolName =
+    envelope?.toolName && envelope.toolName !== CLIACP_GENERIC_TOOL_NAME
+      ? envelope.toolName
+      : "";
+
+  writeCliAcpToolUpdateComment(res, {
+    type: "tool_result",
+    callId,
+    toolName,
+    title: envelope?.title || "",
+    status:
+      String(update?.status || "").trim().toLowerCase() ||
+      envelope?.status ||
+      "completed",
+    inputSummary: envelope?.inputSummary || "",
+    outputText: toToolResultText(update)
+  });
 }
 
 function getReasoningEffortFromBody(body) {
@@ -1492,6 +1867,10 @@ const server = http.createServer(async (req, res) => {
               apiKey,
               signal: abortController.signal,
               onEvent: (evt) => {
+                if (evt?.type === "update") {
+                  emitCliAcpToolUpdateFromAcp(res, evt.update);
+                  return;
+                }
                 if (evt?.type === "reasoning_token" && evt.text) {
                   const reasoningItem = openReasoningItem();
                   reasoningItem.text += evt.text;

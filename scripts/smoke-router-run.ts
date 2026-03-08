@@ -14,6 +14,8 @@ type CliArgs = {
   includeEvents: boolean;
 };
 
+const NATIVE_AUTH_SENTINEL = "__CLI_ACP_NATIVE_AUTH__";
+
 function readFlag(args: string[], name: string): string {
   const index = args.indexOf(name);
   if (index < 0 || index + 1 >= args.length) {
@@ -61,7 +63,32 @@ function summarizeUpdates(updates: any[] | undefined): Record<string, number> {
   return summary;
 }
 
-function readCliAcpApiKeyFromAuthFile(): string {
+function readApiKeyFromAuthEntry(entry: unknown): string {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return "";
+  }
+  const record = entry as Record<string, unknown>;
+  for (const keyName of ["key", "apiKey", "access"]) {
+    const value = record[keyName];
+    if (typeof value !== "string") {
+      continue;
+    }
+    const normalized = value.trim();
+    if (!normalized || normalized === NATIVE_AUTH_SENTINEL) {
+      continue;
+    }
+    return normalized;
+  }
+  return "";
+}
+
+function readCliAcpAuthKeysFromAuthFile() {
+  const empty = {
+    cliacp: "",
+    codex: "",
+    claude: "",
+    gemini: ""
+  };
   const candidates = [
     path.join(os.homedir(), ".local", "share", "opencode", "auth.json"),
     process.env.XDG_DATA_HOME
@@ -73,29 +100,55 @@ function readCliAcpApiKeyFromAuthFile(): string {
     try {
       const raw = fs.readFileSync(candidate, "utf8");
       const parsed = JSON.parse(raw) as Record<string, any>;
-      const key = String(parsed?.cliacp?.key || "").trim();
-      if (key) {
-        return key;
-      }
+      return {
+        cliacp: readApiKeyFromAuthEntry(parsed?.cliacp),
+        codex: readApiKeyFromAuthEntry(parsed?.["cliacp-codex"]),
+        claude: readApiKeyFromAuthEntry(parsed?.["cliacp-claude"]),
+        gemini: readApiKeyFromAuthEntry(parsed?.["cliacp-gemini"])
+      };
     } catch {
       // Try next location.
     }
   }
-  return "";
+  return empty;
 }
 
-function resolveApiKey(): string | undefined {
+function normalizeProviderForModel(model: string): "codex" | "claude" | "gemini" {
+  const id = String(model || "").trim().toLowerCase();
+  if (!id) {
+    return "codex";
+  }
+  if (id.includes("gemini")) {
+    return "gemini";
+  }
+  if (
+    id.includes("claude") ||
+    id.includes("sonnet") ||
+    id.includes("opus") ||
+    id.includes("haiku")
+  ) {
+    return "claude";
+  }
+  return "codex";
+}
+
+function resolveApiKey(args: CliArgs): string | undefined {
   const envKey = String(process.env.CLI_ACP_API_KEY || "").trim();
   if (envKey) {
     return envKey;
   }
-  const authFileKey = readCliAcpApiKeyFromAuthFile();
-  return authFileKey || undefined;
+  const authKeys = readCliAcpAuthKeysFromAuthFile();
+  const provider = normalizeProviderForModel(args.model);
+  const providerKey = authKeys[provider];
+  if (providerKey) {
+    return providerKey;
+  }
+  return authKeys.cliacp || undefined;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const apiKey = resolveApiKey();
+  const apiKey = resolveApiKey(args);
   const result = await runProviderPrompt({
     provider: args.provider,
     model: args.model,
