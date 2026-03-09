@@ -7,6 +7,8 @@ import { AcpProcess } from "./acp-process.js";
 import { APP_CONFIG, buildProviderRuntime } from "./config.js";
 
 const CACHE_TTL_MS = Number(process.env.MODEL_CATALOG_CACHE_MS || 60000);
+const MODEL_CATALOG_RETRY_COUNT = Number(process.env.MODEL_CATALOG_RETRY_COUNT || 3);
+const MODEL_CATALOG_RETRY_DELAY_MS = Number(process.env.MODEL_CATALOG_RETRY_DELAY_MS || 250);
 
 type CatalogModel = {
   id: string;
@@ -34,6 +36,34 @@ function asErrorMessage(error: unknown): string {
   return String(error || "unknown error");
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetries<T>(
+  label: string,
+  fn: () => Promise<T>,
+  attempts = MODEL_CATALOG_RETRY_COUNT
+): Promise<T> {
+  const maxAttempts = Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : 1;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+      const delay = MODEL_CATALOG_RETRY_DELAY_MS * attempt;
+      await sleep(delay);
+    }
+  }
+  throw new Error(
+    `Failed to load ${label} models after ${maxAttempts} attempt(s): ${asErrorMessage(lastError)}`
+  );
+}
+
 function inferProviderFromModel(modelId: string): "codex" | "claude" | "gemini" {
   const id = String(modelId || "").toLowerCase();
   if (id.includes("gemini")) {
@@ -48,6 +78,25 @@ function inferProviderFromModel(modelId: string): "codex" | "claude" | "gemini" 
     return "claude";
   }
   return "codex";
+}
+
+function resolveCatalogApiKey(
+  provider: "codex" | "claude" | "gemini",
+  requestApiKey?: string
+): string {
+  const direct = String(requestApiKey || "").trim();
+  if (direct) {
+    return direct;
+  }
+
+  const envSpecific = String(
+    process.env[`CLI_ACP_${provider.toUpperCase()}_API_KEY`] || ""
+  ).trim();
+  if (envSpecific) {
+    return envSpecific;
+  }
+
+  return String(process.env.CLI_ACP_API_KEY || "").trim();
 }
 
 function toCatalogRecord(
@@ -295,14 +344,37 @@ async function collectGeminiModelsFromCli(): Promise<CatalogModel[]> {
 }
 
 async function fetchCliModels(apiKey?: string): Promise<CatalogModel[]> {
-  const [codexModels, claudeModels, geminiModels] = await Promise.all([
-    collectAcpModels("codex", apiKey),
-    collectAcpModels("claude", apiKey),
-    collectGeminiModelsFromCli()
+  const codexApiKey = resolveCatalogApiKey("codex", apiKey);
+  const claudeApiKey = resolveCatalogApiKey("claude", apiKey);
+  const results = await Promise.allSettled([
+    withRetries("codex CLI", () => collectAcpModels("codex", codexApiKey)),
+    withRetries("claude CLI", () => collectAcpModels("claude", claudeApiKey)),
+    withRetries("gemini CLI", () => collectGeminiModelsFromCli())
   ]);
-  const collected = [...codexModels, ...claudeModels, ...geminiModels];
+
+  const collected: CatalogModel[] = [];
+  const errors: string[] = [];
+  const labels = ["codex CLI", "claude CLI", "gemini CLI"] as const;
+
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const label = labels[index] || `provider #${index + 1}`;
+    if (result.status === "fulfilled") {
+      collected.push(...result.value);
+      continue;
+    }
+    errors.push(`${label}: ${asErrorMessage(result.reason)}`);
+  }
+
+  if (errors.length > 0) {
+    process.stderr.write(
+      `[model-catalog] partial provider failures: ${errors.join(" | ")}\n`
+    );
+  }
+
   if (collected.length === 0) {
-    throw new Error("All CLI model catalogs are empty.");
+    const detail = errors.length > 0 ? ` Errors: ${errors.join(" | ")}` : "";
+    throw new Error(`All CLI model catalogs are empty.${detail}`);
   }
   return collected;
 }

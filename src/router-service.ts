@@ -708,7 +708,17 @@ async function runPooled({
     createRuntime: plan.createRuntime,
     preferredWorkerId: stickySession?.workerId || "",
     signal,
-    waitTimeoutMs: Math.min(timeoutMs, APP_CONFIG.acpPoolAcquireTimeoutMs)
+    waitTimeoutMs: Math.min(timeoutMs, APP_CONFIG.acpPoolAcquireTimeoutMs),
+    onState: (poolEvent) => {
+      if (poolEvent?.stage === "creating_worker") {
+        onEvent?.({
+          type: "pool",
+          stage: "creating_worker",
+          runtimeKey: plan.runtimeKey,
+          sticky: sessionMode === "sticky"
+        });
+      }
+    }
   });
 
   const worker = acquire.worker;

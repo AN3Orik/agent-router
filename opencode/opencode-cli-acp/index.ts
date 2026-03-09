@@ -11,6 +11,9 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROUTER_BOOT_TIMEOUT_MS = 20_000;
 const ROUTER_HEALTH_RETRY_MS = 500;
 const ROUTER_STDERR_TAIL_MAX = 4000;
+const ROUTER_STARTUP_TOAST_DELAY_MS = 600;
+const ROUTER_STARTUP_TOAST_DURATION_MS = 2500;
+const ROUTER_STARTUP_ERROR_TOAST_DURATION_MS = 7000;
 const ROUTER_STATE_KEY = "__cli_acp_router_state__";
 const PROVIDER_ID = "cliacp";
 const NATIVE_AUTH_SENTINEL = "__CLI_ACP_NATIVE_AUTH__";
@@ -22,6 +25,166 @@ const CLIACP_BRIDGE_STATE_KEY = "__cliacp_tool_bridge_state__";
 const CLIACP_BRIDGE_META_SOURCE = "cliacp-acp-bridge";
 const CLIACP_GENERIC_TOOL_NAME = "acp_tool";
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+type RouterStartupObserver = {
+  onStart?: (context: { baseUrl: string }) => void | Promise<void>;
+  onReady?: (context: { baseUrl: string }) => void | Promise<void>;
+  onError?: (context: { baseUrl: string; error: unknown }) => void | Promise<void>;
+};
+
+function fireAndForget(task) {
+  if (typeof task !== "function") {
+    return;
+  }
+  Promise.resolve()
+    .then(task)
+    .catch(() => {
+      // Ignore secondary UI-notification errors.
+    });
+}
+
+function providerLabel(provider) {
+  const normalized = trimOptional(provider).toLowerCase();
+  if (normalized === "claude") {
+    return "Claude CLI";
+  }
+  if (normalized === "gemini") {
+    return "Gemini CLI";
+  }
+  return "Codex CLI";
+}
+
+function describeError(error) {
+  if (error && typeof error === "object" && "message" in error) {
+    return trimOptional((error as { message?: string }).message) || "Unknown error";
+  }
+  return trimOptional(String(error || "")) || "Unknown error";
+}
+
+/**
+ * Uses the native OpenCode toast route to surface CLI startup state in TUI/WebUI.
+ */
+async function showCliAcpToast({
+  client,
+  directory,
+  title,
+  message,
+  variant = "info",
+  duration
+}: {
+  client: any;
+  directory?: string;
+  title?: string;
+  message: string;
+  variant?: "info" | "success" | "warning" | "error" | string;
+  duration?: number;
+}) {
+  const normalizedMessage = trimOptional(message);
+  if (!normalizedMessage) {
+    return;
+  }
+
+  const payload: any = {
+    message: normalizedMessage,
+    variant
+  };
+  const query = directory ? { directory } : undefined;
+  const normalizedTitle = trimOptional(title);
+  if (normalizedTitle) {
+    payload.title = normalizedTitle;
+  }
+  if (Number.isFinite(duration) && duration > 0) {
+    payload.duration = duration;
+  }
+
+  try {
+    if (client?.tui?.showToast) {
+      // SDK v2 shape.
+      const directResult = await client.tui.showToast({
+        ...(query || {}),
+        ...payload
+      });
+      if (!directResult?.error) {
+        return;
+      }
+
+      // Legacy plugin-client shape.
+      const legacyResult = await client.tui.showToast({
+        ...(query ? { query } : {}),
+        body: payload
+      });
+      if (!legacyResult?.error) {
+        return;
+      }
+    }
+  } catch {
+    // Fall through to raw route client.
+  }
+
+  try {
+    if (client?._client?.post) {
+      await client._client.post({
+        url: "/tui/show-toast",
+        ...(query ? { query } : {}),
+        body: payload,
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+    }
+  } catch {
+    // Toasts are best-effort; do not fail request flow.
+  }
+}
+
+/**
+ * Creates a cold-start observer that only displays delayed startup toast once per boot.
+ */
+function createRouterStartupToastObserver({ client, provider, delayMs, directory }) {
+  const launchLabel = providerLabel(provider);
+  const effectiveDelay =
+    Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : ROUTER_STARTUP_TOAST_DELAY_MS;
+  let timer = null;
+
+  const clearTimer = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  return {
+    onStart: () => {
+      if (timer) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void showCliAcpToast({
+          client,
+          directory,
+          message: `Starting ${launchLabel}...`,
+          variant: "info",
+          duration: ROUTER_STARTUP_TOAST_DURATION_MS
+        });
+      }, effectiveDelay);
+    },
+    onReady: () => {
+      clearTimer();
+    },
+    onError: ({ error }) => {
+      clearTimer();
+      const reason = describeError(error);
+      void showCliAcpToast({
+        client,
+        directory,
+        message: `Failed to start ${launchLabel}: ${reason}`,
+        variant: "error",
+        duration: ROUTER_STARTUP_ERROR_TOAST_DURATION_MS
+      });
+    }
+  } as RouterStartupObserver;
+}
 
 function trimRightSlash(value) {
   return String(value || "").replace(/\/+$/, "");
@@ -58,7 +221,9 @@ function getBridgeState() {
       assistantBySession: new Map(),
       toolPartByCall: new Map(),
       pendingBySession: new Map(),
-      queueBySession: new Map()
+      queueBySession: new Map(),
+      startupToastByRequest: new Map(),
+      partOrderByMessage: new Map()
     };
   }
   return globalThis[CLIACP_BRIDGE_STATE_KEY];
@@ -71,16 +236,36 @@ function bridgeCallKey(sessionID, callId) {
   return `${sessionID}::${callId}`;
 }
 
+function bridgeStartupRequestKey(sessionID, requestId) {
+  return `${sessionID}::${requestId}`;
+}
+
+function bridgeMessageKey(sessionID, messageID) {
+  return `${sessionID}::${messageID}`;
+}
+
 /**
- * Generates a deterministic part id so repeated updates target the same tool card.
+ * Allocates a message-local monotonic order index for bridge tool parts.
+ * OpenCode renders parts in id order, so stable ordering must be encoded into part ids.
  */
-function buildStableBridgePartId(sessionID, callId) {
+function allocateBridgePartOrder(state, sessionID, messageID) {
+  const key = bridgeMessageKey(sessionID, messageID);
+  const next = Number(state.partOrderByMessage.get(key) || 0) + 1;
+  state.partOrderByMessage.set(key, next);
+  return next;
+}
+
+/**
+ * Builds a bridge part id sortable by actual tool-call arrival order within a message.
+ */
+function buildOrderedBridgePartId(sessionID, messageID, callId, order) {
   const digest = crypto
     .createHash("sha1")
-    .update(bridgeCallKey(sessionID, callId))
+    .update(`${sessionID}::${messageID}::${callId}`)
     .digest("hex")
-    .slice(0, 24);
-  return `part_${digest}`;
+    .slice(0, 12);
+  const ordinal = String(Math.max(1, Number(order) || 1)).padStart(8, "0");
+  return `part_br_${ordinal}_${digest}`;
 }
 
 /**
@@ -184,7 +369,14 @@ function decodeBridgeCommentLine(line) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return null;
     }
-    if (!trimOptional(payload.type) || !trimOptional(payload.callId)) {
+    const payloadType = trimOptional(payload.type);
+    if (!payloadType) {
+      return null;
+    }
+    if (
+      (payloadType === "tool_call" || payloadType === "tool_result") &&
+      !trimOptional(payload.callId)
+    ) {
       return null;
     }
     return payload;
@@ -374,7 +566,21 @@ function trimOptional(value) {
   return value.trim();
 }
 
-function buildRouterEnv({ pluginWorkdir, apiKey, options }) {
+function resolveCatalogApiKey(globalApiKey, authKeys) {
+  const direct = trimOptional(globalApiKey);
+  if (direct) {
+    return direct;
+  }
+  for (const key of [authKeys?.codex, authKeys?.claude, authKeys?.gemini]) {
+    const value = trimOptional(key);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function buildRouterEnv({ pluginWorkdir, apiKey, options, authKeys = null }) {
   const env: Record<string, string> = {};
 
   if (pluginWorkdir) {
@@ -406,11 +612,29 @@ function buildRouterEnv({ pluginWorkdir, apiKey, options }) {
   if (resolvedApiKey) {
     env.CLI_ACP_API_KEY = resolvedApiKey;
   }
+  const codexApiKey = trimOptional(authKeys?.codex || process.env.CLI_ACP_CODEX_API_KEY);
+  if (codexApiKey) {
+    env.CLI_ACP_CODEX_API_KEY = codexApiKey;
+  }
+  const claudeApiKey = trimOptional(authKeys?.claude || process.env.CLI_ACP_CLAUDE_API_KEY);
+  if (claudeApiKey) {
+    env.CLI_ACP_CLAUDE_API_KEY = claudeApiKey;
+  }
+  const geminiApiKey = trimOptional(authKeys?.gemini || process.env.CLI_ACP_GEMINI_API_KEY);
+  if (geminiApiKey) {
+    env.CLI_ACP_GEMINI_API_KEY = geminiApiKey;
+  }
 
   return env;
 }
 
-async function ensureRouterRunning({ baseUrl, apiKey, routerEntry, extraEnv }) {
+async function ensureRouterRunning({
+  baseUrl,
+  apiKey,
+  routerEntry,
+  extraEnv,
+  startupObserver = null
+}) {
   const requestedBaseUrl = trimOptional(baseUrl) || "http://127.0.0.1:8787/v1";
   const state = getRouterState();
 
@@ -436,6 +660,7 @@ async function ensureRouterRunning({ baseUrl, apiKey, routerEntry, extraEnv }) {
   if (state.bootPromise) {
     return state.bootPromise;
   }
+  fireAndForget(() => startupObserver?.onStart?.({ baseUrl: requestedBaseUrl }));
 
   state.bootPromise = (async (): Promise<string> => {
     const runtimes = resolveRuntimeCommands();
@@ -541,7 +766,11 @@ async function ensureRouterRunning({ baseUrl, apiKey, routerEntry, extraEnv }) {
   try {
     const startedBaseUrl = await state.bootPromise;
     state.activeBaseUrl = startedBaseUrl;
+    fireAndForget(() => startupObserver?.onReady?.({ baseUrl: startedBaseUrl }));
     return startedBaseUrl;
+  } catch (error) {
+    fireAndForget(() => startupObserver?.onError?.({ baseUrl: requestedBaseUrl, error }));
+    throw error;
   } finally {
     state.bootPromise = null;
   }
@@ -586,8 +815,15 @@ function getRequestUrl(input) {
   return "";
 }
 
-async function fetchRouterModelIds(baseURL): Promise<string[]> {
-  const response = await fetch(`${trimRightSlash(baseURL)}/models`);
+async function fetchRouterModelIds(baseURL, apiKey = ""): Promise<string[]> {
+  const headers = new Headers();
+  const key = trimOptional(apiKey);
+  if (key) {
+    headers.set("x-api-key", key);
+  }
+  const response = await fetch(`${trimRightSlash(baseURL)}/models`, {
+    headers
+  });
   if (!response.ok) {
     throw new Error(`Router /v1/models returned HTTP ${response.status}.`);
   }
@@ -726,13 +962,7 @@ async function applyBridgePayloadForSession({
 }) {
   const state = getBridgeState();
   const message = state.assistantBySession.get(sessionID);
-  const messageID = trimOptional(message?.messageID);
-  if (!messageID) {
-    const queue = state.pendingBySession.get(sessionID) || [];
-    queue.push(payload);
-    state.pendingBySession.set(sessionID, queue);
-    return;
-  }
+  const activeMessageID = trimOptional(message?.messageID);
 
   const callId = trimOptional(payload.callId);
   if (!callId) {
@@ -741,6 +971,13 @@ async function applyBridgePayloadForSession({
   const key = bridgeCallKey(sessionID, callId);
   const now = Date.now();
   const stored = state.toolPartByCall.get(key);
+  const messageID = trimOptional(stored?.messageID) || activeMessageID;
+  if (!messageID) {
+    const queue = state.pendingBySession.get(sessionID) || [];
+    queue.push(payload);
+    state.pendingBySession.set(sessionID, queue);
+    return;
+  }
   const input = stored?.input || parseBridgeToolInput(payload.inputSummary);
   const payloadToolName = trimOptional(payload.toolName);
   const toolName =
@@ -752,7 +989,14 @@ async function applyBridgePayloadForSession({
     typeof stored?.startTime === "number" && stored.startTime > 0
       ? stored.startTime
       : now;
-  const partID = stored?.partID || buildStableBridgePartId(sessionID, callId);
+  const partID =
+    stored?.partID ||
+    buildOrderedBridgePartId(
+      sessionID,
+      messageID,
+      callId,
+      allocateBridgePartOrder(state, sessionID, messageID)
+    );
   const metadata = {
     source: CLIACP_BRIDGE_META_SOURCE,
     cliacpBridge: true,
@@ -876,6 +1120,72 @@ async function applyBridgePayloadForSession({
   state.toolPartByCall.delete(key);
 }
 
+function clearBridgeStartupToastTimer(state, requestKey) {
+  const current = state.startupToastByRequest.get(requestKey);
+  if (current?.timer) {
+    clearTimeout(current.timer);
+  }
+  state.startupToastByRequest.delete(requestKey);
+}
+
+/**
+ * Handles non-tool bridge lifecycle payloads used for delayed cold-start startup toasts.
+ */
+function handleBridgeCliStatusPayload({ client, directory, sessionID, payload }) {
+  const stage = trimOptional(payload?.stage).toLowerCase();
+  const requestId =
+    trimOptional(payload?.requestId) || trimOptional(payload?.responseId);
+  if (!stage || !requestId) {
+    return;
+  }
+
+  const state = getBridgeState();
+  const requestKey = bridgeStartupRequestKey(sessionID, requestId);
+
+  if (stage === "starting" || stage === "initializing") {
+    if (state.startupToastByRequest.has(requestKey)) {
+      return;
+    }
+    const provider =
+      trimOptional(payload?.provider) || normalizeProviderForModel(payload?.model);
+    const launchLabel = providerLabel(provider);
+    const timer = setTimeout(() => {
+      clearBridgeStartupToastTimer(state, requestKey);
+      void showCliAcpToast({
+        client,
+        directory,
+        message: `Starting ${launchLabel}...`,
+        variant: "info",
+        duration: ROUTER_STARTUP_TOAST_DURATION_MS
+      });
+    }, ROUTER_STARTUP_TOAST_DELAY_MS);
+    state.startupToastByRequest.set(requestKey, {
+      timer,
+      createdAt: Date.now()
+    });
+    return;
+  }
+
+  if (stage === "ready" || stage === "completed") {
+    clearBridgeStartupToastTimer(state, requestKey);
+    return;
+  }
+
+  if (stage === "failed" || stage === "error") {
+    clearBridgeStartupToastTimer(state, requestKey);
+    const provider =
+      trimOptional(payload?.provider) || normalizeProviderForModel(payload?.model);
+    const reason = describeError(payload?.reason);
+    void showCliAcpToast({
+      client,
+      directory,
+      message: `Failed to start ${providerLabel(provider)}: ${reason}`,
+      variant: "error",
+      duration: ROUTER_STARTUP_ERROR_TOAST_DURATION_MS
+    });
+  }
+}
+
 /**
  * Observes cloned Responses stream and dispatches bridge comment payloads to the queue.
  */
@@ -896,6 +1206,15 @@ function observeBridgeStream({
   const processLine = (line) => {
     const payload = decodeBridgeCommentLine(line);
     if (!payload) {
+      return;
+    }
+    if (payload.type === "cli_status") {
+      handleBridgeCliStatusPayload({
+        client,
+        directory,
+        sessionID,
+        payload
+      });
       return;
     }
     enqueueBridgeSessionJob(sessionID, async () => {
@@ -944,6 +1263,14 @@ function resolveAuthPath() {
   const dataDir = trimOptional(process.env.OPENCODE_DATA_DIR);
   if (dataDir) {
     return path.join(dataDir, "auth.json");
+  }
+  const xdgDataHome = trimOptional(process.env.XDG_DATA_HOME);
+  if (xdgDataHome) {
+    return path.join(xdgDataHome, "opencode", "auth.json");
+  }
+  const testHome = trimOptional(process.env.OPENCODE_TEST_HOME);
+  if (testHome) {
+    return path.join(testHome, ".local", "share", "opencode", "auth.json");
   }
   return path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
 }
@@ -1245,6 +1572,12 @@ export async function CliAcpAuthPlugin() {
         if (current?.messageID === messageID) {
           state.assistantBySession.delete(sessionID);
         }
+        state.partOrderByMessage.delete(bridgeMessageKey(sessionID, messageID));
+        for (const [key, record] of state.toolPartByCall.entries()) {
+          if (record?.sessionID === sessionID && record?.messageID === messageID) {
+            state.toolPartByCall.delete(key);
+          }
+        }
       }
     },
     "experimental.chat.messages.transform": async (_input, output) => {
@@ -1285,10 +1618,12 @@ export async function CliAcpAuthPlugin() {
       const existingProvider = ensureObject(providerMap[PROVIDER_ID]);
       const existingOptions = ensureObject(existingProvider.options);
       const apiKey = trimOptional(process.env.CLI_ACP_API_KEY);
+      const authKeys = readCliAcpAuthKeys();
       const routerEnv = buildRouterEnv({
         pluginWorkdir,
         apiKey,
-        options: existingOptions
+        options: existingOptions,
+        authKeys
       });
       configuredMcpServers = buildAcpMcpServersFromConfig(currentConfig.mcp);
 
@@ -1301,7 +1636,8 @@ export async function CliAcpAuthPlugin() {
           extraEnv: routerEnv
         });
       }
-      const modelIds = await fetchRouterModelIds(catalogBaseURL);
+      const catalogApiKey = resolveCatalogApiKey(apiKey, authKeys);
+      const modelIds = await fetchRouterModelIds(catalogBaseURL, catalogApiKey);
 
       const providerPayload = await buildCliAcpProviderConfig({
         existingProvider,
@@ -1413,17 +1749,9 @@ export async function CliAcpAuthPlugin() {
         const routerEnv = buildRouterEnv({
           pluginWorkdir,
           apiKey: globalApiKey,
-          options
+          options,
+          authKeys
         });
-
-        if (autoStartRouter && isLocalBaseUrl(baseURL)) {
-          baseURL = await ensureRouterRunning({
-            baseUrl: baseURL,
-            apiKey: globalApiKey,
-            routerEntry,
-            extraEnv: routerEnv
-          });
-        }
 
         return {
           ...options,
@@ -1435,18 +1763,11 @@ export async function CliAcpAuthPlugin() {
           },
           apiKey: sdkApiKey,
           fetch: async (input, init) => {
-            if (autoStartRouter && isLocalBaseUrl(baseURL)) {
-              baseURL = await ensureRouterRunning({
-                baseUrl: baseURL,
-                apiKey: globalApiKey,
-                routerEntry,
-                extraEnv: routerEnv
-              });
-            }
             let patchedInit = init || {};
             let requestApiKey = globalApiKey;
             const url = getRequestUrl(input);
             let requestBody = parseJsonBody(patchedInit);
+            let requestProvider = normalizeProviderForModel(requestBody?.model);
             const isWriteRequest = (() => {
               if (!url) {
                 return false;
@@ -1467,6 +1788,7 @@ export async function CliAcpAuthPlugin() {
                   mcpServers: configuredMcpServers
                 });
                 if (patched) {
+                  requestProvider = patched.provider || requestProvider;
                   requestApiKey = patched.apiKey || requestApiKey;
                   requestBody = patched.body;
                   patchedInit = {
@@ -1475,6 +1797,23 @@ export async function CliAcpAuthPlugin() {
                   };
                 }
               }
+            }
+            if (autoStartRouter && isLocalBaseUrl(baseURL)) {
+              const startupObserver = isWriteRequest
+                ? createRouterStartupToastObserver({
+                    client: bridgeClient,
+                    provider: requestProvider,
+                    delayMs: ROUTER_STARTUP_TOAST_DELAY_MS,
+                    directory: bridgeDirectory
+                  })
+                : null;
+              baseURL = await ensureRouterRunning({
+                baseUrl: baseURL,
+                apiKey: globalApiKey,
+                routerEntry,
+                extraEnv: routerEnv,
+                startupObserver
+              });
             }
             const requestHeaders = new Headers(patchedInit?.headers || {});
             if (sdkApiKey === NATIVE_AUTH_SENTINEL) {

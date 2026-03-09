@@ -67,6 +67,7 @@ type AcquireInput = {
   preferredWorkerId?: string;
   signal?: AbortSignal;
   waitTimeoutMs?: number;
+  onState?: ((event: { stage: "creating_worker"; runtimeKey: string }) => void) | null;
 };
 
 type PoolOptions = {
@@ -443,7 +444,8 @@ export class AcpWorkerPool {
     createRuntime,
     preferredWorkerId = "",
     signal,
-    waitTimeoutMs
+    waitTimeoutMs,
+    onState = null
   }: AcquireInput): Promise<AcquireResult> {
     if (this.closed) {
       throw new Error("ACP worker pool is closed.");
@@ -464,6 +466,10 @@ export class AcpWorkerPool {
     }
 
     if (this.canCreateWorker(bucket)) {
+      onState?.({
+        stage: "creating_worker",
+        runtimeKey
+      });
       worker = await this.createWorker(runtimeKey, createRuntime);
       this.markWorkerBusy(worker);
       return {

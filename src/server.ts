@@ -753,11 +753,63 @@ function parseToolNameFromCallId(rawCallId) {
   if (!callId) {
     return "";
   }
-  const match = /^(.+)-(\d{6,})$/.exec(callId);
+  const match = /^(.+)-([0-9]{6,}|[0-9a-f]{8,}|[0-9a-f-]{16,})$/i.exec(callId);
   if (!match) {
-    return "";
+    const normalized = callId.toLowerCase();
+    if (
+      normalized.startsWith("call_") ||
+      normalized.startsWith("toolu_") ||
+      normalized.startsWith("msg_") ||
+      normalized.startsWith("resp_") ||
+      /^[0-9a-f]{32,}$/i.test(callId) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId)
+    ) {
+      return "";
+    }
+    // Gemini can emit plain tool names without a timestamp suffix.
+    return callId;
   }
   return String(match[1] || "").trim();
+}
+
+function parseServerToolFromToken(rawToken) {
+  const token = String(rawToken || "").trim();
+  if (!token) {
+    return { server: "", tool: "" };
+  }
+
+  const fromMcpTitle = parseMcpToolNameFromTitle(token);
+  if (fromMcpTitle) {
+    const idx = fromMcpTitle.indexOf("/");
+    if (idx > 0 && idx + 1 < fromMcpTitle.length) {
+      return {
+        server: fromMcpTitle.slice(0, idx),
+        tool: fromMcpTitle.slice(idx + 1)
+      };
+    }
+  }
+
+  if (token.includes("/")) {
+    const idx = token.indexOf("/");
+    if (idx > 0 && idx + 1 < token.length) {
+      return {
+        server: token.slice(0, idx),
+        tool: token.slice(idx + 1)
+      };
+    }
+  }
+
+  // Gemini tool_call_update may only include toolCallId like "NTS-FileSystem-MCP_nts_file_read-<ts>".
+  if (token.includes("_")) {
+    const idx = token.indexOf("_");
+    const left = token.slice(0, idx).trim();
+    const right = token.slice(idx + 1).trim();
+    if (left && right && /mcp/i.test(left)) {
+      return { server: left, tool: right };
+    }
+  }
+
+  return { server: "", tool: "" };
 }
 
 function extractToolArguments(rawInput) {
@@ -803,16 +855,37 @@ function toToolCallEnvelope(update) {
     return null;
   }
 
-  const server = String(rawInput.server || "").trim();
-  const tool = String(rawInput.tool || "").trim();
-  const title = String(update?.title || "").trim();
+  const parsedCallToolName = parseToolNameFromCallId(callId);
+  const parsedCallDescriptor = parseServerToolFromToken(parsedCallToolName);
+
+  const server = String(rawInput.server || parsedCallDescriptor.server || "").trim();
+  const tool = String(rawInput.tool || parsedCallDescriptor.tool || "").trim();
+  const explicitTitle = String(update?.title || "").trim();
   const command = normalizeCommand(rawInput.command);
   const cwd = String(rawInput.cwd || "").trim();
   const kind = String(update?.kind || rawInput.kind || "").trim();
   const source = String(rawInput.source || "").trim();
   const status = String(update?.status || "").trim().toLowerCase();
-  const mcpToolNameFromTitle = parseMcpToolNameFromTitle(title);
-  const toolNameFromCallId = parseToolNameFromCallId(callId);
+  const mcpToolNameFromTitle = parseMcpToolNameFromTitle(explicitTitle);
+  const toolNameFromCallId = parsedCallToolName;
+  const inferredTitle = (() => {
+    if (server && tool) {
+      return `Tool: ${server}/${tool}`;
+    }
+    if (tool) {
+      return `Tool: ${tool}`;
+    }
+    if (mcpToolNameFromTitle) {
+      return `Tool: ${mcpToolNameFromTitle}`;
+    }
+    if (toolNameFromCallId) {
+      return `Tool: ${toolNameFromCallId}`;
+    }
+    if (command.length > 0) {
+      return `Tool: ${command[0]}`;
+    }
+    return "";
+  })();
 
   const toolName = (() => {
     if (server && tool) {
@@ -830,17 +903,29 @@ function toToolCallEnvelope(update) {
     if (toolNameFromCallId) {
       return toolNameFromCallId;
     }
-    if (title) {
-      return title;
+    if (explicitTitle) {
+      return explicitTitle;
     }
     return "acp_tool";
   })();
+  const title = (() => {
+    if (explicitTitle) {
+      return explicitTitle;
+    }
+    return inferredTitle;
+  })();
+  const inferredMcp =
+    Boolean(server && tool) ||
+    /^mcp__/i.test(toolNameFromCallId) ||
+    /(?:^|[-_])mcp(?:[-_]|$)/i.test(toolNameFromCallId);
+  const effectiveKind = kind || (toolName !== "acp_tool" ? "other" : "");
+  const effectiveSource = source || (inferredMcp ? "mcp" : "");
   const toolArguments = extractToolArguments(rawInput);
 
   const summary = {
     title: title || undefined,
-    source: source || undefined,
-    kind: kind || undefined,
+    source: effectiveSource || undefined,
+    kind: effectiveKind || undefined,
     ...(server ? { server } : {}),
     ...(tool ? { tool } : {}),
     ...(toolArguments !== undefined ? { arguments: toolArguments } : {}),
@@ -903,6 +988,16 @@ function writeCliAcpToolUpdateComment(res, payload) {
     "utf8"
   ).toString("base64");
   writeSseComment(res, `${CLIACP_ACP_SSE_COMMENT_PREFIX} ${encoded}`);
+}
+
+/**
+ * Emits lifecycle side-channel updates (non-tool) consumed by OpenCode plugin UI bridge.
+ */
+function emitCliAcpLifecycleUpdateComment(res, payload) {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+  writeCliAcpToolUpdateComment(res, payload);
 }
 
 /**
@@ -1924,6 +2019,52 @@ const server = http.createServer(async (req, res) => {
               apiKey,
               signal: abortController.signal,
               onEvent: (evt) => {
+                if (evt?.type === "pool") {
+                  const stage = String(evt?.stage || "").trim().toLowerCase();
+                  if (stage === "creating_worker") {
+                    emitCliAcpLifecycleUpdateComment(res, {
+                      type: "cli_status",
+                      stage: "starting",
+                      requestId: responseId,
+                      provider,
+                      model
+                    });
+                  }
+                  return;
+                }
+                if (evt?.type === "status") {
+                  const stage = String(evt?.stage || "").trim().toLowerCase();
+                  if (stage === "initializing") {
+                    emitCliAcpLifecycleUpdateComment(res, {
+                      type: "cli_status",
+                      stage,
+                      requestId: responseId,
+                      provider,
+                      model
+                    });
+                  }
+                  return;
+                }
+                if (evt?.type === "initialized") {
+                  emitCliAcpLifecycleUpdateComment(res, {
+                    type: "cli_status",
+                    stage: "ready",
+                    requestId: responseId,
+                    provider,
+                    model
+                  });
+                  return;
+                }
+                if (evt?.type === "completed") {
+                  emitCliAcpLifecycleUpdateComment(res, {
+                    type: "cli_status",
+                    stage: "completed",
+                    requestId: responseId,
+                    provider,
+                    model
+                  });
+                  return;
+                }
                 if (evt?.type === "update") {
                   emitCliAcpToolUpdateFromAcp(res, evt.update);
                   return;
@@ -2015,6 +2156,14 @@ const server = http.createServer(async (req, res) => {
           );
           writeSseData(res, "[DONE]");
         } catch (err) {
+          emitCliAcpLifecycleUpdateComment(res, {
+            type: "cli_status",
+            stage: "failed",
+            requestId: responseId,
+            provider,
+            model,
+            reason: err instanceof Error ? err.message : "stream_failed"
+          });
           if (!res.writableEnded) {
             writeSseData(
               res,
