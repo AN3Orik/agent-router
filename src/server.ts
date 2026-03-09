@@ -565,6 +565,63 @@ function buildPromptBlocksFromInput(input) {
   return blocks;
 }
 
+function hasReusableStickySession(sessionRouting) {
+  return (
+    sessionRouting?.sessionMode === "sticky" &&
+    typeof sessionRouting?.routerSessionId === "string" &&
+    sessionRouting.routerSessionId.trim().length > 0
+  );
+}
+
+function pickLatestUserMessage(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return messages;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const item = messages[index];
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const role = String(item.role || "").trim().toLowerCase();
+    if (role === "user") {
+      return [item];
+    }
+  }
+  return messages;
+}
+
+function pickLatestUserInput(input) {
+  if (!Array.isArray(input) || input.length === 0) {
+    return input;
+  }
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const item = input[index];
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const role = String(item.role || "").trim().toLowerCase();
+    if (role === "user") {
+      return [item];
+    }
+  }
+  return input;
+}
+
+function buildChatPromptBlocks(body, sessionRouting) {
+  const messages = hasReusableStickySession(sessionRouting)
+    ? pickLatestUserMessage(body?.messages)
+    : body?.messages;
+  return buildPromptBlocksFromMessages(messages);
+}
+
+function buildResponsesPromptBlocks(body, sessionRouting) {
+  const rawInput = body?.input ?? body?.message ?? body?.prompt;
+  const input = hasReusableStickySession(sessionRouting)
+    ? pickLatestUserInput(rawInput)
+    : rawInput;
+  return buildPromptBlocksFromInput(input);
+}
+
 function mapFinishReason(stopReason) {
   const reason = String(stopReason || "").toLowerCase();
   if (reason.includes("max")) {
@@ -784,7 +841,6 @@ function toToolCallEnvelope(update) {
     title: title || undefined,
     source: source || undefined,
     kind: kind || undefined,
-    status: status || undefined,
     ...(server ? { server } : {}),
     ...(tool ? { tool } : {}),
     ...(toolArguments !== undefined ? { arguments: toolArguments } : {}),
@@ -1134,16 +1190,17 @@ function resolveSessionRouting({
     }
   }
 
+  const effectiveBridgeKey = bridgeKey;
   let routerSessionId = explicitRouterSessionId;
   if (!routerSessionId && resolvedMode === "sticky") {
-    routerSessionId = readBridgedRouterSessionId(bridgeKey);
+    routerSessionId = readBridgedRouterSessionId(effectiveBridgeKey);
   }
 
   return {
     sessionMode: resolvedMode || undefined,
     routerSessionId: routerSessionId || undefined,
     releaseSession,
-    bridgeKey
+    bridgeKey: effectiveBridgeKey
   };
 }
 
@@ -1452,7 +1509,6 @@ const server = http.createServer(async (req, res) => {
       });
       const provider = resolved.provider;
       const model = resolved.model || body.model || "auto";
-      const prompt = buildPromptBlocksFromMessages(body.messages);
       const streamRequest = body.stream === true;
       const sessionRouting = resolveSessionRouting({
         body,
@@ -1462,6 +1518,7 @@ const server = http.createServer(async (req, res) => {
         defaultSessionMode: streamRequest ? "sticky" : "stateless",
         enableAutoBridge: streamRequest
       });
+      const prompt = buildChatPromptBlocks(body, sessionRouting);
 
       if (streamRequest) {
         const completionId = `chatcmpl_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -1684,7 +1741,6 @@ const server = http.createServer(async (req, res) => {
       });
       const provider = resolved.provider;
       const model = resolved.model || body.model || "auto";
-      const prompt = buildPromptBlocksFromInput(body.input ?? body.message ?? body.prompt);
       const streamRequest = body.stream === true;
       const sessionRouting = resolveSessionRouting({
         body,
@@ -1694,6 +1750,7 @@ const server = http.createServer(async (req, res) => {
         defaultSessionMode: streamRequest ? "sticky" : "stateless",
         enableAutoBridge: streamRequest
       });
+      const prompt = buildResponsesPromptBlocks(body, sessionRouting);
 
       if (streamRequest) {
         const responseId = `resp_${crypto.randomUUID().replace(/-/g, "")}`;

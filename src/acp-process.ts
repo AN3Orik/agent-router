@@ -5,6 +5,11 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 const JSONRPC = "2.0";
+const DIAG_MAX_RECENT_UPDATES = 24;
+const DIAG_MAX_NONJSON_LINES = 12;
+const DIAG_MAX_TEXT_TAIL = 400;
+const DIAG_MAX_STDERR_TAIL = 800;
+const DIAG_MAX_LINE_TAIL = 260;
 
 type PermissionMode = "allow" | "reject";
 
@@ -105,6 +110,15 @@ function makeError(code: number, message: string, data?: unknown): JsonRpcError 
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeAcpCwd(value: string): string {
+  const resolved = path.resolve(value);
+  if (process.platform !== "win32") {
+    return resolved;
+  }
+  // Prefer forward slashes for tool-call JSON arguments to avoid backslash escaping issues.
+  return resolved.replace(/\\/g, "/");
 }
 
 class TerminalRegistry {
@@ -262,6 +276,9 @@ export class AcpProcess {
   private stdoutBuffer = "";
   private nextId = 1;
   private sessionId: string | null = null;
+  private lastSessionUpdateAt = 0;
+  private readonly recentSessionUpdates: SessionUpdate[] = [];
+  private readonly recentNonJsonStdout: string[] = [];
   public stderr = "";
   private closed = false;
   private readonly terminalRegistry = new TerminalRegistry();
@@ -298,6 +315,8 @@ export class AcpProcess {
   resetCapturedOutput(): void {
     this.updates = [];
     this.textOutput = "";
+    this.recentSessionUpdates.length = 0;
+    this.recentNonJsonStdout.length = 0;
   }
 
   async start(): Promise<void> {
@@ -414,7 +433,7 @@ export class AcpProcess {
 
   async newSession(cwd?: string, mcpServers: AcpMcpServer[] = []): Promise<any> {
     const payload: Record<string, unknown> = {
-      cwd: path.resolve(cwd || this.cwd),
+      cwd: normalizeAcpCwd(cwd || this.cwd),
       mcpServers: Array.isArray(mcpServers) ? mcpServers : []
     };
     if (this.sessionMeta) {
@@ -451,6 +470,32 @@ export class AcpProcess {
       },
       timeoutMs
     );
+  }
+
+  async waitForSessionQuiescence({
+    quietMs = 0,
+    maxWaitMs = 0
+  }: {
+    quietMs?: number;
+    maxWaitMs?: number;
+  }): Promise<void> {
+    const requiredQuietMs = Math.max(0, Number(quietMs || 0));
+    if (requiredQuietMs <= 0) {
+      return;
+    }
+
+    const maxWait = Math.max(requiredQuietMs, Number(maxWaitMs || 0));
+    const deadline = Date.now() + maxWait;
+    for (;;) {
+      const idleForMs = Date.now() - this.lastSessionUpdateAt;
+      if (idleForMs >= requiredQuietMs) {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        return;
+      }
+      await sleep(Math.min(50, requiredQuietMs));
+    }
   }
 
   request(method: string, params: any, timeoutMs = 180000): Promise<any> {
@@ -518,6 +563,7 @@ export class AcpProcess {
       message = JSON.parse(line) as RpcMessage;
     } catch {
       this.stderr += `\n[stdout-nonjson] ${line}`;
+      this.rememberNonJsonStdout(line);
       return;
     }
 
@@ -549,7 +595,15 @@ export class AcpProcess {
     this.pending.delete(message.id);
 
     if (message.error) {
-      pending.reject(new Error(`ACP error (${pending.method}): ${JSON.stringify(message.error)}`));
+      const base = `ACP error (${pending.method}): ${JSON.stringify(message.error)}`;
+      if (pending.method === "session/prompt") {
+        const diagnostics = this.buildPromptErrorDiagnostics(message.error);
+        pending.reject(
+          new Error(diagnostics ? `${base} | diagnostics: ${diagnostics}` : base)
+        );
+        return;
+      }
+      pending.reject(new Error(base));
       return;
     }
     pending.resolve(message.result);
@@ -563,6 +617,8 @@ export class AcpProcess {
     if (!update || typeof update !== "object") {
       return;
     }
+    this.rememberSessionUpdate(update);
+    this.lastSessionUpdateAt = Date.now();
     this.updates.push(update);
     if (this.onUpdate) {
       try {
@@ -697,5 +753,126 @@ export class AcpProcess {
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, String(params?.content ?? ""), "utf8");
     return {};
+  }
+
+  private rememberSessionUpdate(update: SessionUpdate): void {
+    this.recentSessionUpdates.push(update);
+    if (this.recentSessionUpdates.length > DIAG_MAX_RECENT_UPDATES) {
+      this.recentSessionUpdates.splice(
+        0,
+        this.recentSessionUpdates.length - DIAG_MAX_RECENT_UPDATES
+      );
+    }
+  }
+
+  private rememberNonJsonStdout(line: string): void {
+    const compact = String(line || "").replace(/\s+/g, " ").trim();
+    if (!compact) {
+      return;
+    }
+    this.recentNonJsonStdout.push(
+      compact.slice(0, DIAG_MAX_LINE_TAIL)
+    );
+    if (this.recentNonJsonStdout.length > DIAG_MAX_NONJSON_LINES) {
+      this.recentNonJsonStdout.splice(
+        0,
+        this.recentNonJsonStdout.length - DIAG_MAX_NONJSON_LINES
+      );
+    }
+  }
+
+  private buildPromptErrorDiagnostics(error: JsonRpcError): string {
+    const parts: string[] = [];
+    const details = (() => {
+      if (!error || typeof error !== "object") {
+        return "";
+      }
+      const data = (error as Record<string, unknown>).data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        return "";
+      }
+      const detail = (data as Record<string, unknown>).details;
+      if (typeof detail === "string" && detail.trim()) {
+        return detail.trim();
+      }
+      const message = (data as Record<string, unknown>).message;
+      if (typeof message === "string" && message.trim()) {
+        return message.trim();
+      }
+      return "";
+    })();
+    if (details) {
+      parts.push(`error_details=${JSON.stringify(details)}`);
+    }
+
+    if (this.recentSessionUpdates.length > 0) {
+      parts.push(`updates_count=${this.recentSessionUpdates.length}`);
+      const recentKinds = this.recentSessionUpdates
+        .slice(-8)
+        .map((update) => String(update?.sessionUpdate || "unknown"));
+      parts.push(`recent_updates=${JSON.stringify(recentKinds)}`);
+
+      const lastUpdate = this.recentSessionUpdates[this.recentSessionUpdates.length - 1];
+      const lastUpdateKind = String(lastUpdate?.sessionUpdate || "unknown");
+      const lastStatus = String((lastUpdate as any)?.status || "").trim().toLowerCase();
+      const lastToolCallId = String((lastUpdate as any)?.toolCallId || "").trim();
+      const lastToolName = String((lastUpdate as any)?.toolName || "").trim();
+      parts.push(
+        `last_update=${JSON.stringify({
+          kind: lastUpdateKind,
+          ...(lastStatus ? { status: lastStatus } : {}),
+          ...(lastToolCallId ? { toolCallId: lastToolCallId } : {}),
+          ...(lastToolName ? { toolName: lastToolName } : {})
+        })}`
+      );
+      const lastChunkText =
+        typeof (lastUpdate as any)?.content?.text === "string"
+          ? String((lastUpdate as any).content.text).replace(/\s+/g, " ").trim()
+          : "";
+      if (lastChunkText) {
+        parts.push(`last_chunk_text_tail=${JSON.stringify(lastChunkText.slice(-220))}`);
+      }
+
+      const lastToolUpdate = [...this.recentSessionUpdates]
+        .reverse()
+        .find(
+          (update) =>
+            String(update?.sessionUpdate || "").toLowerCase() === "tool_call" ||
+            String(update?.sessionUpdate || "").toLowerCase() === "tool_call_update"
+        ) as Record<string, unknown> | undefined;
+      if (lastToolUpdate) {
+        const rawInput =
+          lastToolUpdate.rawInput &&
+          typeof lastToolUpdate.rawInput === "object" &&
+          !Array.isArray(lastToolUpdate.rawInput)
+            ? (lastToolUpdate.rawInput as Record<string, unknown>)
+            : {};
+        parts.push(
+          `last_tool_update=${JSON.stringify({
+            kind: String(lastToolUpdate.sessionUpdate || ""),
+            toolCallId: String(lastToolUpdate.toolCallId || ""),
+            status: String(lastToolUpdate.status || ""),
+            title: String(lastToolUpdate.title || ""),
+            rawInputKeys: Object.keys(rawInput).slice(0, 16)
+          })}`
+        );
+      }
+    }
+
+    const textTail = this.textOutput.slice(-DIAG_MAX_TEXT_TAIL).replace(/\s+/g, " ").trim();
+    if (textTail) {
+      parts.push(`text_tail=${JSON.stringify(textTail)}`);
+    }
+
+    const stderrTail = this.stderr.slice(-DIAG_MAX_STDERR_TAIL).replace(/\s+/g, " ").trim();
+    if (stderrTail) {
+      parts.push(`stderr_tail=${JSON.stringify(stderrTail)}`);
+    }
+
+    if (this.recentNonJsonStdout.length > 0) {
+      parts.push(`stdout_nonjson_tail=${JSON.stringify(this.recentNonJsonStdout.slice(-5))}`);
+    }
+
+    return parts.join("; ");
   }
 }

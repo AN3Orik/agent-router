@@ -19,6 +19,7 @@ export const APP_CONFIG = {
     process.env.CLI_ACP_CLAUDE_BASE_URL || DEFAULT_CLI_ACP_CLAUDE_BASE_URL,
   geminiBaseUrl:
     process.env.CLI_ACP_GEMINI_BASE_URL || DEFAULT_CLI_ACP_GEMINI_BASE_URL,
+  cliAcpDebugLogDir: (process.env.CLI_ACP_DEBUG_LOG_DIR || "").trim(),
   acpPoolEnabled: (process.env.ACP_POOL_ENABLED || "1") !== "0",
   acpPoolMaxSize: Number(process.env.ACP_POOL_MAX_SIZE || 2),
   acpPoolMinSize: Number(process.env.ACP_POOL_MIN_SIZE || 0),
@@ -356,6 +357,34 @@ function normalizeApiKey(apiKey?: string): string {
   return apiKey.trim();
 }
 
+function sanitizeLogComponent(value: string, fallback: string): string {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return normalized || fallback;
+}
+
+function buildDebugLogFilePath(provider: string, model: string): string {
+  const logDir = APP_CONFIG.cliAcpDebugLogDir;
+  if (!logDir) {
+    return "";
+  }
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+  } catch {
+    return "";
+  }
+  const safeProvider = sanitizeLogComponent(provider, "provider");
+  const safeModel = sanitizeLogComponent(model, "model");
+  const fileName = `${safeProvider}-${safeModel}-${Date.now()}-${crypto
+    .randomUUID()
+    .slice(0, 8)}.log`;
+  return path.join(logDir, fileName);
+}
+
 export function getDefaultModel(provider) {
   return DEFAULT_MODELS[provider];
 }
@@ -638,6 +667,14 @@ export function buildProviderRuntime(
       env.GEMINI_API_KEY = normalizedApiKey;
       env.GOOGLE_API_KEY = normalizedApiKey;
       env.GEMINI_DEFAULT_AUTH_TYPE = "gemini-api-key";
+    }
+    if (!env.GEMINI_DEBUG_LOG_FILE) {
+      const debugLogFile =
+        String(process.env.GEMINI_DEBUG_LOG_FILE || "").trim() ||
+        buildDebugLogFilePath(provider, selectedModel);
+      if (debugLogFile) {
+        env.GEMINI_DEBUG_LOG_FILE = debugLogFile;
+      }
     }
 
     return {

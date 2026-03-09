@@ -470,6 +470,7 @@ function bindRunnerEvents(runner: any, onEvent?: ((event: any) => void) | null) 
 
 async function executePromptOnRunner({
   runner,
+  provider,
   init,
   message,
   cwd,
@@ -520,10 +521,31 @@ async function executePromptOnRunner({
     }
 
     onEvent?.({ type: "status", stage: "prompting" });
+    if (provider === "gemini") {
+      // Gemini ACP can still flush turn-bound updates right around prompt boundaries.
+      // Waiting for short quiescence reduces malformed tool-call terminations on follow-up turns.
+      await withAbort(
+        runner.waitForSessionQuiescence({
+          quietMs: 300,
+          maxWaitMs: 2000
+        }),
+        signal
+      );
+    }
     const promptResult = await withAbort(
       runner.prompt(message, timeoutMs, sessionId),
       signal
     );
+    if (provider === "gemini") {
+      // Ensure the stream is fully settled before the next turn starts on sticky sessions.
+      await withAbort(
+        runner.waitForSessionQuiescence({
+          quietMs: 300,
+          maxWaitMs: 2000
+        }),
+        signal
+      );
+    }
 
     const elapsedMs = Date.now() - startedAt;
     const outputText = runner.textOutput.trim();
@@ -588,6 +610,7 @@ async function runEphemeral({
   try {
     execution = await executePromptOnRunner({
       runner,
+      provider,
       init: null,
       message,
       cwd,
@@ -710,6 +733,7 @@ async function runPooled({
   try {
     execution = await executePromptOnRunner({
       runner: worker.runner,
+      provider,
       init: worker.init,
       message,
       cwd,
