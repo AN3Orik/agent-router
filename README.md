@@ -1,24 +1,30 @@
 # agent-router
 
-Local OpenAPI router for `codex`, `claude`, and `gemini` CLIs via ACP.
+Local OpenAPI-compatible router for `codex`, `claude`, and `gemini` CLIs over ACP.
 
-## What you get
+## What this project provides
 
-- One local HTTP endpoint for 3 CLI backends
-- OpenAI-compatible APIs: `/v1/models`, `/v1/chat/completions`, `/v1/responses`
-- Streaming output (tokens + reasoning where supported)
-- Sticky/session pooling support for long conversations
-- OpenCode plugin integration (`CliACP`)
+- One HTTP router for three CLI backends (Codex ACP, Claude ACP, Gemini CLI)
+- OpenAI-style endpoints:
+  - `GET /v1/models`
+  - `POST /v1/chat/completions`
+  - `POST /v1/responses`
+- Native ACP endpoints:
+  - `POST /v1/agents/chat`
+  - `POST /v1/agents/chat/stream`
+- Worker pool + sticky sessions for long-running chats
+- MCP server forwarding to CLI runtimes
+- OpenCode plugin (`opencode-cli-acp`) with dynamic provider/model injection
 
 ## Requirements
 
 - Node.js 20+
-- Installed CLIs in `PATH`:
+- CLI tools in `PATH`:
   - `codex-acp`
   - `claude-code-acp`
   - `gemini`
 
-Optional (if CLIs are not installed yet):
+Install CLIs if needed:
 
 ```powershell
 npm i -g @zed-industries/codex-acp
@@ -29,15 +35,23 @@ npm i -g @google/gemini-cli
 ## Quick start (router)
 
 ```powershell
-cd H:\GIT\!Libs\agent-router
 npm install
 npm start
 ```
 
-Router starts at:
+Default router address:
+
 - `http://127.0.0.1:8787`
 
-## Basic API call
+## Quick API examples
+
+List models:
+
+```powershell
+irm "http://127.0.0.1:8787/v1/models"
+```
+
+Non-streaming chat call:
 
 ```powershell
 $body = @{
@@ -52,45 +66,88 @@ irm -Method Post `
   -Body $body
 ```
 
-## Auth behavior
+OpenAI Responses streaming call:
 
-- If no API key is provided, router uses native CLI auth sessions.
-- API key can be passed via:
-  1. `CLI_ACP_API_KEY`
-  2. request body `apiKey`
-  3. header `X-API-Key` (or `Authorization: Bearer ...`)
+```powershell
+$body = @{
+  model = "gemini-3.1-pro-preview"
+  stream = $true
+  input = @(
+    @{
+      role = "user"
+      content = @(
+        @{
+          type = "input_text"
+          text = "Respond with exactly OK"
+        }
+      )
+    }
+  )
+} | ConvertTo-Json -Depth 8
 
-## Upstream API URL behavior
+irm -Method Post `
+  -Uri "http://127.0.0.1:8787/v1/responses" `
+  -ContentType "application/json" `
+  -Body $body
+```
 
-Defaults:
-- Codex/Claude: `https://co.yes.vg`
-- Gemini: `https://co.yes.vg/gemini`
+## Authentication behavior
 
-Global env overrides:
+If no API key is passed, CLI native auth/session is used.
+
+For requests, API key precedence is:
+
+1. `apiKey` in request body
+2. `X-API-Key` header (or `Authorization: Bearer ...`)
+3. `CLI_ACP_API_KEY` env
+
+For model catalog loading (`/v1/models`), optional per-provider env keys are also supported:
+
+- `CLI_ACP_CODEX_API_KEY`
+- `CLI_ACP_CLAUDE_API_KEY`
+- `CLI_ACP_GEMINI_API_KEY`
+
+Gemini runtime behavior:
+
+- if request starts with API key auth and Gemini returns an invalid-key auth error, router retries the same request once without API key (native CLI auth/OAuth).
+
+## Upstream URL behavior
+
+By default, router does not force custom upstream URLs and lets each official CLI use its native default endpoint.
+
+Global overrides:
+
 - `CLI_ACP_CODEX_BASE_URL`
 - `CLI_ACP_CLAUDE_BASE_URL`
 - `CLI_ACP_GEMINI_BASE_URL`
 
 Per-request overrides:
-- `baseUrl` (Codex/Claude)
-- `geminiBaseUrl` (Gemini)
 
-## Session modes
+- `baseUrl` for Codex/Claude
+- `geminiBaseUrl` for Gemini
 
-With pool enabled (`ACP_POOL_ENABLED=1`, default):
-- `sessionMode: "stateless"`: reuse worker, new ACP session per request
-- `sessionMode: "sticky"`: reuse ACP session across requests via `routerSessionId`
-- `releaseSession: true`: closes sticky session after response
+## Worker pool and sessions
+
+Pool is enabled by default (`ACP_POOL_ENABLED=1`).
+
+Session modes:
+
+- `stateless`: reuse worker process, create new ACP session per request
+- `sticky`: reuse ACP session using `routerSessionId`
 
 Useful endpoints:
+
 - `GET /health`
 - `GET /v1/runtime`
 - `GET /v1/providers`
 - `GET /openapi.json`
 
-## OpenCode plugin (CliACP)
+## OpenCode plugin
 
-Plugin docs are in:
+OpenCode plugin package: `opencode-cli-acp`
+
+Plugin docs:
+
 - `opencode/README.md`
 
 Build plugin bundle:
@@ -99,27 +156,25 @@ Build plugin bundle:
 npm run build:opencode-plugin
 ```
 
-Install plugin:
+Local dev install:
 
 ```powershell
 npm run dev:opencode-plugin:install
 ```
 
-After install in OpenCode:
-1. Run `opencode auth login`
-2. Choose provider `CliACP`
-3. Choose one method:
-   - `Codex CLI`
-   - `Claude CLI`
-   - `Gemini CLI`
-
-Each method stores key separately for that CLI.
-
-## Build standalone `.exe` (Bun)
+Local dev uninstall:
 
 ```powershell
-npm run build:router:exe
+npm run dev:opencode-plugin:uninstall
 ```
 
-Output:
+## Build and test scripts
+
+- Type check/build TS: `npm run build:ts`
+- Build plugin bundle: `npm run build:opencode-plugin`
+- Build standalone router exe: `npm run build:router:exe`
+- Router smoke check: `npm run smoke:router -- --model gpt-5.3-codex --message "Respond with exactly OK"`
+
+Standalone exe output:
+
 - `dist/router/agent-router.exe`

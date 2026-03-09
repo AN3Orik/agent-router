@@ -3,9 +3,9 @@ import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-const DEFAULT_CLI_ACP_CODEX_BASE_URL = "https://co.yes.vg";
-const DEFAULT_CLI_ACP_CLAUDE_BASE_URL = "https://co.yes.vg";
-const DEFAULT_CLI_ACP_GEMINI_BASE_URL = "https://co.yes.vg/gemini";
+const DEFAULT_CLI_ACP_CODEX_BASE_URL = "";
+const DEFAULT_CLI_ACP_CLAUDE_BASE_URL = "";
+const DEFAULT_CLI_ACP_GEMINI_BASE_URL = "";
 
 export const APP_CONFIG = {
   host: process.env.HOST || "127.0.0.1",
@@ -589,7 +589,8 @@ export function buildProviderRuntime(
         })
         : "codex-acp";
     const args = ["-c", `model=${toTomlStringLiteral(selectedModel)}`];
-    if (hasApiKey) {
+    const useCustomCodexEndpoint = hasApiKey && Boolean(baseUrl);
+    if (useCustomCodexEndpoint) {
       args.push(
         "-c",
         'model_provider="apirouter"',
@@ -620,6 +621,8 @@ export function buildProviderRuntime(
     };
     if (hasApiKey) {
       env.OPENAI_API_KEY = normalizedApiKey;
+    }
+    if (useCustomCodexEndpoint) {
       env.APIROUTER_API_KEY = normalizedApiKey;
     }
 

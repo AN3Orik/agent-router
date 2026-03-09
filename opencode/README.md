@@ -99,6 +99,95 @@ Model list source:
 - `codex-acp` and `claude-code-acp` via ACP `session/new`
 - `gemini` via installed `gemini-cli-core` model config
 
+## Oh My OpenCode compatibility
+
+If you use `oh-my-opencode` (`https://github.com/code-yeongyu/oh-my-openagent/`), below is a reference config that maps recommended OmO agents/categories to `CliACP` models.
+
+<details>
+<summary>Show example OmO configuration (JSON)</summary>
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+  "agents": {
+    "sisyphus": {
+      "model": "cliacp/claude-opus-4-6",
+      "variant": "max"
+    },
+    "librarian": {
+      "model": "cliacp/claude-sonnet-4-5"
+    },
+    "explore": {
+      "model": "cliacp/gpt-5.1-codex-mini"
+    },
+    "oracle": {
+      "model": "cliacp/gpt-5.4",
+      "variant": "high"
+    },
+    "frontend-ui-ux-engineer": {
+      "model": "cliacp/antigravity-gemini-3.1-pro"
+    },
+    "multimodal-looker": {
+      "model": "cliacp/gemini-3-flash-preview"
+    },
+    "prometheus": {
+      "model": "cliacp/claude-opus-4-6",
+      "variant": "max"
+    },
+    "metis": {
+      "model": "cliacp/claude-opus-4-6",
+      "variant": "max"
+    },
+    "momus": {
+      "model": "cliacp/gpt-5.4",
+      "variant": "medium"
+    },
+    "atlas": {
+      "model": "cliacp/claude-sonnet-4-5"
+    },
+    "sisyphus-junior": {
+      "model": "cliacp/gpt-5.3-codex",
+      "variant": "high"
+    },
+    "hephaestus": {
+      "model": "cliacp/gpt-5.3-codex",
+      "variant": "medium"
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "cliacp/gemini-3.1-pro-preview"
+    },
+    "ultrabrain": {
+      "model": "cliacp/gpt-5.3-codex",
+      "variant": "xhigh"
+    },
+    "artistry": {
+      "model": "cliacp/gemini-3.1-pro-preview",
+      "variant": "high"
+    },
+    "quick": {
+      "model": "cliacp/claude-haiku-4-5"
+    },
+    "unspecified-low": {
+      "model": "cliacp/claude-sonnet-4-5"
+    },
+    "unspecified-high": {
+      "model": "cliacp/claude-sonnet-4-5"
+    },
+    "deep": {
+      "model": "cliacp/gpt-5.3-codex",
+      "variant": "medium"
+    },
+    "writing": {
+      "model": "cliacp/gemini-3-flash-preview"
+    }
+  }
+}
+```
+
+</details>
+
 ## Troubleshooting
 
 - If `CliACP` does not appear in provider list, restart OpenCode after plugin install.

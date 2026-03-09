@@ -434,6 +434,27 @@ function asErrorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+function normalizeApiKeyValue(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
+}
+
+function isGeminiInvalidApiKeyError(err: unknown): boolean {
+  const message = asErrorMessage(err, "").toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes("api key not valid") ||
+    message.includes("invalid api key") ||
+    message.includes("api_key_invalid") ||
+    message.includes("provided api key") ||
+    message.includes("api key is invalid")
+  );
+}
+
 function bindRunnerEvents(runner: any, onEvent?: ((event: any) => void) | null) {
   runner.resetCapturedOutput();
   runner.setUpdateHandler((update) => {
@@ -831,32 +852,34 @@ async function runInternal({
   routerSessionId,
   releaseSession
 }: any) {
-  if (!APP_CONFIG.acpPoolEnabled) {
-    if (sessionMode === "sticky") {
-      throw new Error("Sticky sessions require ACP_POOL_ENABLED=1.");
-    }
-    return runEphemeral({
-      provider,
-      requestedProvider,
-      model,
-      message,
-      cwd,
-      timeoutMs,
-      permissionMode,
-      mcpServers,
-      includeEvents,
-      apiKey,
-      reasoningEffort,
-      reasoningSummary,
-      baseUrl,
-      geminiBaseUrl,
-      onEvent,
-      signal
-    });
-  }
+  const normalizedApiKey = normalizeApiKeyValue(apiKey);
 
-  try {
-    return await runPooled({
+  const runAttempt = (attemptApiKey: string) => {
+    if (!APP_CONFIG.acpPoolEnabled) {
+      if (sessionMode === "sticky") {
+        throw new Error("Sticky sessions require ACP_POOL_ENABLED=1.");
+      }
+      return runEphemeral({
+        provider,
+        requestedProvider,
+        model,
+        message,
+        cwd,
+        timeoutMs,
+        permissionMode,
+        mcpServers,
+        includeEvents,
+        apiKey: attemptApiKey,
+        reasoningEffort,
+        reasoningSummary,
+        baseUrl,
+        geminiBaseUrl,
+        onEvent,
+        signal
+      });
+    }
+
+    return runPooled({
       provider,
       requestedProvider,
       model,
@@ -866,7 +889,7 @@ async function runInternal({
       permissionMode,
       mcpServers,
       includeEvents,
-      apiKey,
+      apiKey: attemptApiKey,
       reasoningEffort,
       reasoningSummary,
       baseUrl,
@@ -877,8 +900,30 @@ async function runInternal({
       routerSessionId,
       releaseSession
     });
+  };
+
+  try {
+    return await runAttempt(normalizedApiKey);
   } catch (err) {
-    throw new Error(asErrorMessage(err, "Failed to run ACP prompt."));
+    const shouldRetryWithoutKey =
+      provider === "gemini" &&
+      Boolean(normalizedApiKey) &&
+      isGeminiInvalidApiKeyError(err);
+
+    if (!shouldRetryWithoutKey) {
+      throw new Error(asErrorMessage(err, "Failed to run ACP prompt."));
+    }
+
+    onEvent?.({
+      type: "status",
+      stage: "retry_without_api_key"
+    });
+
+    try {
+      return await runAttempt("");
+    } catch (retryErr) {
+      throw new Error(asErrorMessage(retryErr, "Failed to run ACP prompt."));
+    }
   }
 }
 
